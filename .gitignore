@@ -1,0 +1,10 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+__pycache__/
+*.egg-info/
+node_modules/
+*.pickle
+*.parquet
+/web/dist/
