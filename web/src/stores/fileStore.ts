@@ -3,7 +3,7 @@ import type { RankData } from "../compute";
 import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../types/snapshot";
 import type { Anomaly } from "../compute/anomalies";
 import { detectAnomalies } from "../compute/anomalies";
-import { createWorkerPool, type WorkerResult, type WorkerTask } from "../compute/workerPool";
+import { createWorkerPool, type WorkerResult, type WorkerTask, type LoadPhase } from "../compute/workerPool";
 import { STRIP_PALETTE_RGB } from "../views/glRenderer";
 
 type FileReader = () => Promise<ArrayBuffer>;
@@ -12,6 +12,10 @@ interface FileState {
   status: "idle" | "loading" | "ready" | "error";
   fileNames: string[];
   progress: number;
+  phase: LoadPhase | "idle";
+  completedCount: number;
+  inFlightCount: number;
+  totalCount: number;
   error: string | null;
   ranks: number[];
   rankData: Map<number, RankData>;
@@ -133,6 +137,10 @@ export const useFileStore = create<FileState>((set) => ({
   status: "idle",
   fileNames: [],
   progress: 0,
+  phase: "idle",
+  completedCount: 0,
+  inFlightCount: 0,
+  totalCount: 0,
   error: null,
   ranks: [],
   rankData: new Map(),
@@ -161,7 +169,19 @@ export const useFileStore = create<FileState>((set) => ({
     await loadAllParallel(entries, set);
   },
 
-  reset: () => set({ status: "idle", fileNames: [], progress: 0, error: null, ranks: [], rankData: new Map() }),
+  reset: () =>
+    set({
+      status: "idle",
+      fileNames: [],
+      progress: 0,
+      phase: "idle",
+      completedCount: 0,
+      inFlightCount: 0,
+      totalCount: 0,
+      error: null,
+      ranks: [],
+      rankData: new Map(),
+    }),
 }));
 
 async function loadAllParallel(
@@ -172,7 +192,17 @@ async function loadAllParallel(
   if (entries.length === 0) { set({ status: "error", error: "No .pickle files found" }); return; }
 
   const ranks = entries.map((e) => extractRank(e.name)).sort((a, b) => a - b);
-  set({ status: "loading", fileNames: entries.map((e) => e.name), progress: 0, error: null, ranks });
+  set({
+    status: "loading",
+    fileNames: entries.map((e) => e.name),
+    progress: 0,
+    phase: "compile_wasm",
+    completedCount: 0,
+    inFlightCount: 0,
+    totalCount: entries.length,
+    error: null,
+    ranks,
+  });
 
   const tasks: WorkerTask[] = entries.map((e) => ({
     rank: extractRank(e.name),
@@ -196,8 +226,14 @@ async function loadAllParallel(
     (rank, error) => {
       console.error(`[memviz] rank ${rank} failed:`, error);
     },
-    (completed, total) => {
-      set({ progress: completed / total });
+    (completed, inFlight, total, phase) => {
+      set({
+        progress: completed / total,
+        phase,
+        completedCount: completed,
+        inFlightCount: inFlight,
+        totalCount: total,
+      });
     },
   );
 

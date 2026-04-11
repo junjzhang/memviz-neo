@@ -5,3 +5,4 @@ __pycache__/
 /wasm/pkg/
 *.pickle
 /web/dist/
+/.superset/

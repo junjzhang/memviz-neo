@@ -3,26 +3,50 @@ import { useFileStore } from "../stores/fileStore";
 
 const hasDirectoryPicker = typeof window !== "undefined" && "showDirectoryPicker" in window;
 
+const PHASE_LABEL: Record<string, string> = {
+  idle: "Preparing",
+  compile_wasm: "Compiling WASM",
+  init_workers: "Spawning workers",
+  parsing: "Parsing snapshots",
+  done: "Finishing up",
+};
+
 export default function FileSelector() {
-  const { status, progress, error, fileNames, openDirectory, openFiles } = useFileStore();
+  const { status, phase, completedCount, inFlightCount, totalCount, error, fileNames, openDirectory, openFiles } =
+    useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
   if (status === "loading") {
-    const pct = Math.round(progress * 100);
-    const currentFile =
-      fileNames[Math.min(Math.floor(progress * fileNames.length), fileNames.length - 1)] ?? "";
+    const label = PHASE_LABEL[phase] || "Loading";
+    const progressPct =
+      totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
+    // Show currently-active file (first in-flight). Fallback to last finished.
+    const activeIdx = Math.min(completedCount, fileNames.length - 1);
+    const currentFile = fileNames[activeIdx] ?? "";
+
     return (
       <div className="fs-root">
         <div className="fs-stage">
-          <div className="fs-eyebrow">Parsing snapshots</div>
+          <div className="fs-eyebrow">
+            {label}
+            <span className="fs-eyebrow-dot" />
+          </div>
           <div className="fs-bignum display">
-            {String(pct).padStart(2, "0")}
-            <span className="fs-bignum-unit">%</span>
+            {String(completedCount).padStart(2, "0")}
+            <span className="fs-bignum-unit"> / {String(totalCount).padStart(2, "0")}</span>
           </div>
           <div className="fs-progress-track">
-            <div className="fs-progress-bar" style={{ width: `${pct}%` }} />
+            <div className="fs-progress-bar" style={{ width: `${progressPct}%` }} />
+            <div className="fs-progress-indeterminate" />
           </div>
-          <div className="fs-current-file mono">{currentFile || "\u00a0"}</div>
+          <div className="fs-loading-meta mono">
+            <span>{currentFile || "\u00a0"}</span>
+            {inFlightCount > 0 && (
+              <span className="faint">
+                {inFlightCount} in flight
+              </span>
+            )}
+          </div>
         </div>
         <FsStyle />
       </div>
@@ -181,6 +205,20 @@ function FsStyle() {
       .fs-fp-v { font-size: 12px; color: var(--fg); }
 
       /* Loading view */
+      .fs-eyebrow-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin-left: 10px;
+        vertical-align: 1px;
+        background: var(--accent);
+        animation: fs-pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes fs-pulse {
+        0%, 100% { opacity: 0.25; transform: scale(0.8); }
+        50%      { opacity: 1; transform: scale(1.2); }
+      }
+
       .fs-bignum {
         font-size: clamp(120px, 16vw, 220px);
         font-weight: 500;
@@ -190,12 +228,14 @@ function FsStyle() {
         margin: var(--s2) 0 var(--s5);
       }
       .fs-bignum-unit {
-        font-size: 0.3em;
+        font-size: 0.28em;
         color: var(--fg-faint);
         margin-left: 0.2em;
         vertical-align: 0.5em;
+        font-weight: 400;
       }
       .fs-progress-track {
+        position: relative;
         height: 2px;
         background: var(--border);
         width: 560px;
@@ -203,18 +243,46 @@ function FsStyle() {
         overflow: hidden;
       }
       .fs-progress-bar {
+        position: absolute;
+        top: 0; left: 0;
         height: 100%;
         background: var(--accent);
-        transition: width 200ms var(--ease);
+        transition: width 300ms var(--ease);
       }
-      .fs-current-file {
+      /* Indeterminate sweep — always running while loading, so the bar
+         never appears frozen even when completed=0. */
+      .fs-progress-indeterminate {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        width: 30%;
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(217, 249, 157, 0.45) 50%,
+          transparent 100%
+        );
+        animation: fs-sweep 1.8s ease-in-out infinite;
+      }
+      @keyframes fs-sweep {
+        0%   { left: -30%; }
+        100% { left: 100%; }
+      }
+      .fs-loading-meta {
         margin-top: var(--s3);
         font-size: 11px;
         color: var(--fg-faint);
+        display: flex;
+        justify-content: space-between;
+        gap: var(--s4);
+        max-width: 560px;
         white-space: nowrap;
         overflow: hidden;
+      }
+      .fs-loading-meta > span:first-child {
+        flex: 1;
+        overflow: hidden;
         text-overflow: ellipsis;
-        max-width: 560px;
       }
 
       /* Corner marks */
