@@ -1,10 +1,7 @@
-# pixi environments
-.pixi/*
-!.pixi/config.toml
-
-__pycache__/
-*.egg-info/
 node_modules/
+__pycache__/
+/test_data/
+/wasm/target/
+/wasm/pkg/
 *.pickle
-*.parquet
 /web/dist/

@@ -1,13 +1,17 @@
 import type { ReactNode } from "react";
-import { Layout as AntLayout, Select, Spin } from "antd";
+import { Layout as AntLayout, Select, Spin, Button } from "antd";
+import { FolderOpenOutlined } from "@ant-design/icons";
 import { useDataStore } from "../stores/dataStore";
+import { useFileStore } from "../stores/fileStore";
 import { formatBytes } from "../utils";
 
 const { Header, Content } = AntLayout;
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { ranks, currentRank, summary, loading, setCurrentRank } =
-    useDataStore();
+  const { ranks, currentRank, summary, loading, setCurrentRank } = useDataStore();
+  const resetFiles = useFileStore((s) => s.reset);
+  const resetData = useDataStore((s) => s.resetData);
+  const handleReset = () => { resetFiles(); resetData(); };
 
   return (
     <AntLayout style={{ minHeight: "100vh", background: "#0a0a0a" }}>
@@ -21,6 +25,13 @@ export default function Layout({ children }: { children: ReactNode }) {
           padding: "0 24px",
         }}
       >
+        <Button
+          type="text"
+          icon={<FolderOpenOutlined />}
+          onClick={handleReset}
+          style={{ color: "#888" }}
+          title="Open another directory"
+        />
         <span style={{ fontWeight: 700, fontSize: 16, color: "#fff" }}>
           memviz-neo
         </span>

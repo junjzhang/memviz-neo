@@ -8,8 +8,9 @@ import type {
 import type {
   TimelineData,
   TimelineBlock,
-  TimelineBlocksResponse,
+  AllocationDetail,
 } from "../types/timeline";
+import { getAllocationDetail, type RankData, type Anomaly, type Allocation } from "../compute";
 
 interface DataState {
   ranks: number[];
@@ -21,19 +22,37 @@ interface DataState {
   multiRankOverview: RankSummary[];
   timeline: TimelineData | null;
   timelineBlocks: TimelineBlock[];
+  anomalies: Anomaly[];
   loading: boolean;
   error: string | null;
+  focusedAddr: number | null;
+  focusRange: [number, number] | null;
+
+  _rankCache: Map<number, RankData>;
+  _allocCache: Map<number, Allocation[]>;
 
   setCurrentRank: (rank: number) => void;
-  fetchRanks: () => Promise<void>;
-  fetchRankData: (rank: number) => Promise<void>;
-  fetchMultiRankOverview: () => Promise<void>;
+  loadFromFiles: (rankData: Map<number, RankData>) => void;
+  getDetail: (rank: number, addr: number) => AllocationDetail | null;
+  focusAnomaly: (anomaly: Anomaly) => void;
+  clearFocus: () => void;
+  resetData: () => void;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url}: ${res.status}`);
-  return res.json();
+function applyRankData(data: RankData, rank: number): Partial<DataState> {
+  return {
+    currentRank: rank,
+    summary: data.summary,
+    treemap: data.treemap,
+    segments: data.segments,
+    topAllocations: data.topAllocations,
+    timeline: data.timeline,
+    timelineBlocks: data.timelineBlocks,
+    anomalies: data.anomalies,
+    focusedAddr: null,
+    focusRange: null,
+    loading: false,
+  };
 }
 
 export const useDataStore = create<DataState>((set, get) => ({
@@ -46,59 +65,88 @@ export const useDataStore = create<DataState>((set, get) => ({
   multiRankOverview: [],
   timeline: null,
   timelineBlocks: [],
+  anomalies: [],
   loading: false,
   error: null,
+  focusedAddr: null,
+  focusRange: null,
+  _rankCache: new Map(),
+  _allocCache: new Map(),
 
   setCurrentRank: (rank: number) => {
-    set({ currentRank: rank });
-    get().fetchRankData(rank);
+    const data = get()._rankCache.get(rank);
+    if (!data) return;
+    const ac = new Map(get()._allocCache);
+    ac.set(rank, data.allocations);
+    set({ ...applyRankData(data, rank), _allocCache: ac });
   },
 
-  fetchRanks: async () => {
-    try {
-      const ranks = await fetchJson<number[]>("/api/ranks");
-      set({ ranks });
-      if (ranks.length > 0) {
-        await get().fetchRankData(ranks[0]);
-        get().fetchMultiRankOverview();
-      }
-    } catch (e) {
-      set({ error: String(e) });
-    }
-  },
+  loadFromFiles: (rankData: Map<number, RankData>) => {
+    const state = get();
+    const parsedRanks = [...rankData.keys()].sort((a, b) => a - b);
 
-  fetchRankData: async (rank: number) => {
-    set({ loading: true, error: null, currentRank: rank });
-    try {
-      const [summary, treemap, segments, topAllocations, timeline, blocksResp] =
-        await Promise.all([
-          fetchJson<RankSummary>(`/api/summary/${rank}`),
-          fetchJson<TreemapNode>(`/api/treemap/${rank}`),
-          fetchJson<SegmentInfo[]>(`/api/segments/${rank}`),
-          fetchJson<TopAllocation[]>(`/api/top_allocations/${rank}?limit=100`),
-          fetchJson<TimelineData>(`/api/timeline/${rank}`),
-          fetchJson<TimelineBlocksResponse>(`/api/timeline_blocks/${rank}`),
-        ]);
+    // New dataset if:
+    //  - nothing loaded yet, OR
+    //  - _rankCache reference changed (reset + new load), OR
+    //  - currentRank no longer exists in new data
+    const isNewDataset =
+      !state.summary ||
+      state._rankCache !== rankData && !state._rankCache.has(parsedRanks[0]) ||
+      !rankData.has(state.currentRank);
+
+    if (isNewDataset) {
+      const first = parsedRanks[0];
+      const data = rankData.get(first)!;
+      const ac = new Map<number, Allocation[]>();
+      ac.set(first, data.allocations);
       set({
-        summary,
-        treemap,
-        segments,
-        topAllocations,
-        timeline,
-        timelineBlocks: blocksResp.blocks,
-        loading: false,
+        ranks: parsedRanks,
+        multiRankOverview: parsedRanks.map((r) => rankData.get(r)!.summary),
+        _rankCache: rankData,
+        _allocCache: ac,
+        error: null,
+        ...applyRankData(data, first),
       });
-    } catch (e) {
-      set({ error: String(e), loading: false });
+    } else {
+      // Progressive update in same dataset: only refresh rank list and overview
+      const needsOverview = parsedRanks.length !== state.ranks.length;
+      set({
+        ranks: parsedRanks,
+        ...(needsOverview ? { multiRankOverview: parsedRanks.map((r) => rankData.get(r)!.summary) } : {}),
+        _rankCache: rankData,
+      });
     }
   },
 
-  fetchMultiRankOverview: async () => {
-    try {
-      const data = await fetchJson<RankSummary[]>("/api/multi_rank_overview");
-      set({ multiRankOverview: data });
-    } catch (e) {
-      set({ error: String(e) });
-    }
+  getDetail: (rank: number, addr: number): AllocationDetail | null => {
+    const allocs = get()._allocCache.get(rank);
+    if (!allocs) return null;
+    return getAllocationDetail(allocs, addr);
   },
+
+  focusAnomaly: (anomaly: Anomaly) => {
+    const padding = Math.max(100000, (anomaly.free_us > 0 ? anomaly.free_us - anomaly.alloc_us : 1000000) * 0.3);
+    const tMin = anomaly.alloc_us - padding;
+    const tMax = (anomaly.free_us > 0 ? anomaly.free_us : anomaly.alloc_us + padding * 2) + padding;
+    set({ focusedAddr: anomaly.addr, focusRange: [tMin, tMax] });
+  },
+
+  clearFocus: () => set({ focusedAddr: null, focusRange: null }),
+
+  resetData: () => set({
+    ranks: [],
+    currentRank: 0,
+    summary: null,
+    treemap: null,
+    segments: [],
+    topAllocations: [],
+    multiRankOverview: [],
+    timeline: null,
+    timelineBlocks: [],
+    anomalies: [],
+    focusedAddr: null,
+    focusRange: null,
+    _rankCache: new Map(),
+    _allocCache: new Map(),
+  }),
 }));

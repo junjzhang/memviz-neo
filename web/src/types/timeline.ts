@@ -23,6 +23,7 @@ export interface TimelineBlock {
   addr: number;
   size: number;
   alloc_us: number;
+  free_requested_us: number; // -1 if no free_requested event
   free_us: number;
   alive: boolean;
   top_frame: string;

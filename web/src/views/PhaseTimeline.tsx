@@ -1,49 +1,75 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import type {
   TimelineData,
-  TimelineAnnotation,
   TimelineBlock,
   AllocationDetail,
 } from "../types/timeline";
 import { formatBytes } from "../utils";
+import { useDataStore } from "../stores/dataStore";
+import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
+
+import type { Anomaly } from "../compute";
 
 interface Props {
   data: TimelineData;
   blocks: TimelineBlock[];
+  anomalies: Anomaly[];
   width: number;
   height: number;
   currentRank: number;
 }
 
+const ANOMALY_COLORS: Record<string, string> = {
+  pending_free: "#ef4444",
+  leak: "#f59e0b",
+};
+const FLAG_SIZE = 8;
+
 const MARGIN = { top: 20, right: 20, bottom: 40, left: 80 };
 
-const BLOCK_PALETTE = [
-  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
-  "#06b6d4", "#ec4899", "#14b8a6", "#f97316", "#6366f1",
-  "#84cc16", "#e879f9", "#0ea5e9", "#fb923c", "#a78bfa",
-];
 
-const PHASE_COLORS: Record<string, string> = {
-  "FSDP::all_gather": "rgba(59,130,246,0.10)",
-  "FSDP::reduce_scatter": "rgba(239,68,68,0.10)",
-  "Optimizer.step": "rgba(34,197,94,0.10)",
-};
+type RulerType = "vertical" | "horizontal";
+interface Ruler {
+  type: RulerType;
+  startPx: { x: number; y: number };
+  endPx: { x: number; y: number };
+}
 
-function getPhaseColor(name: string): string | null {
-  for (const [prefix, color] of Object.entries(PHASE_COLORS)) {
-    if (name.startsWith(prefix)) return color;
-  }
-  return null;
+function formatTime(us: number): string {
+  if (us < 1000) return `${us.toFixed(0)}\u00b5s`;
+  if (us < 1e6) return `${(us / 1000).toFixed(2)}ms`;
+  return `${(us / 1e6).toFixed(4)}s`;
+}
+
+function drawPill(ctx: CanvasRenderingContext2D, text: string, cx: number, cy: number) {
+  ctx.font = "11px monospace";
+  const tw = ctx.measureText(text).width;
+  const px = 5, py = 3;
+  const rw = tw + px * 2, rh = 14 + py * 2;
+  const rx = cx - rw / 2, ry = cy - rh / 2;
+  ctx.fillStyle = "rgba(255,220,50,0.92)";
+  ctx.beginPath();
+  ctx.roundRect(rx, ry, rw, rh, 4);
+  ctx.fill();
+  ctx.fillStyle = "#000";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, cx, cy);
+  ctx.textBaseline = "alphabetic";
 }
 
 export default function PhaseTimeline({
   data,
   blocks,
+  anomalies,
   width,
   height,
   currentRank,
 }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);   // 2D overlay
+  const glCanvasRef = useRef<HTMLCanvasElement>(null);  // WebGL strips
+  const glRef = useRef<GLState | null>(null);
+  const stripKeyRef = useRef("");
   const [viewRange, setViewRange] = useState<[number, number]>([
     data.time_min,
     data.time_max,
@@ -52,16 +78,72 @@ export default function PhaseTimeline({
   const [detail, setDetail] = useState<AllocationDetail | null>(null);
   const [hoverBlock, setHoverBlock] = useState<TimelineBlock | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
-  const [isPanning, setIsPanning] = useState(false);
-  const panStartRef = useRef<{ x: number; range: [number, number] } | null>(null);
+  const [selRect, setSelRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const selStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Anomaly focus from store — smooth animated transition
+  const focusedAddr = useDataStore((s) => s.focusedAddr);
+  const focusRange = useDataStore((s) => s.focusRange);
+  const animRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!focusRange) return;
+    cancelAnimationFrame(animRef.current);
+    const from: [number, number] = [...viewRange];
+    const to = focusRange;
+    const start = performance.now();
+    const duration = 350;
+    function tick(now: number) {
+      const t = Math.min(1, (now - start) / duration);
+      const ease = t * (2 - t); // ease-out quad
+      setViewRange([from[0] + (to[0] - from[0]) * ease, from[1] + (to[1] - from[1]) * ease]);
+      if (t < 1) animRef.current = requestAnimationFrame(tick);
+    }
+    animRef.current = requestAnimationFrame(tick);
+    canvasRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return () => cancelAnimationFrame(animRef.current);
+  }, [focusRange]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (focusedAddr !== null) {
+      const block = blocks.find((b) => b.addr === focusedAddr) ?? null;
+      setSelectedBlock(block);
+      if (block) {
+        const d = useDataStore.getState().getDetail(currentRank, block.addr);
+        setDetail(d);
+      }
+    }
+  }, [focusedAddr, blocks, currentRank]);
+
+  // Ruler state
+  const [ruler, setRuler] = useState<Ruler | null>(null);
+  const rulerDragRef = useRef<{ type: RulerType; startPx: { x: number; y: number } } | null>(null);
+  const keysDownRef = useRef<Set<string>>(new Set());
+
+  // Anomaly flag hover
+  const [hoverAnomaly, setHoverAnomaly] = useState<{ anomaly: Anomaly; x: number; y: number } | null>(null);
+
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
-  const maxBytes = data.peak_bytes * 1.1;
+
+  const maxBytes = useMemo(() => {
+    const [tMin, tMax] = viewRange;
+    let maxB = 0;
+    for (const block of blocks) {
+      for (const strip of block.strips) {
+        if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
+        const top = strip.y_offset + block.size;
+        if (top > maxB) maxB = top;
+      }
+    }
+    return (maxB || data.peak_bytes) * 1.1;
+  }, [viewRange, blocks, data.peak_bytes]);
 
   useEffect(() => {
     setViewRange([data.time_min, data.time_max]);
     setSelectedBlock(null);
     setDetail(null);
+    setRuler(null);
   }, [data.time_min, data.time_max]);
 
   const timeToX = useCallback(
@@ -81,7 +163,20 @@ export default function PhaseTimeline({
     [maxBytes, plotH],
   );
 
-  // draw
+  // --- WebGL strip upload (once per data change) ---
+  useEffect(() => {
+    const glCanvas = glCanvasRef.current;
+    if (!glCanvas) return;
+    if (!glRef.current) glRef.current = initGL(glCanvas);
+    if (!glRef.current) return;
+    const key = `${currentRank}-${blocks.length}-${blocks[0]?.addr}-${blocks[0]?.strips.length}`;
+    if (key !== stripKeyRef.current) {
+      uploadStrips(glRef.current, blocks);
+      stripKeyRef.current = key;
+    }
+  }, [blocks, currentRank]);
+
+  // --- Render: WebGL strips + 2D overlay ---
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -93,145 +188,201 @@ export default function PhaseTimeline({
     canvas.height = height * dpr;
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
-    ctx.scale(dpr, dpr);
-
-    ctx.fillStyle = "#0a0a0a";
-    ctx.fillRect(0, 0, width, height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const [tMin, tMax] = viewRange;
 
-    // annotation phase bands
-    const paired = pairAnnotations(data.annotations);
-    for (const { name, start, end } of paired) {
-      if (end < tMin || start > tMax) continue;
-      const color = getPhaseColor(name);
-      if (!color) continue;
-      const x1 = Math.max(timeToX(start), MARGIN.left);
-      const x2 = Math.min(timeToX(end), MARGIN.left + plotW);
-      if (x2 - x1 < 0.3) continue;
-      ctx.fillStyle = color;
-      ctx.fillRect(x1, MARGIN.top, x2 - x1, plotH);
-    }
-
-    // Draw polygon strips — each strip is a rectangle at constant y_offset
-    for (const block of blocks) {
-      ctx.fillStyle = BLOCK_PALETTE[block.idx % BLOCK_PALETTE.length];
-      for (const strip of block.strips) {
-        if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
-        const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
-        const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
-        const sw = x2 - x1;
-        if (sw < 0.3) continue;
-        const y1 = bytesToY(strip.y_offset + block.size);
-        const y2 = bytesToY(strip.y_offset);
-        const sh = y2 - y1;
-        if (sh < 0.3) continue;
-        ctx.fillRect(x1, y1, sw, sh);
-      }
-    }
-
-    // Draw block labels on the longest visible strip
-    ctx.globalAlpha = 0.9;
-    ctx.font = "10px monospace";
-    for (const block of blocks) {
-      let bestX1 = 0, bestX2 = 0, bestY1 = 0, bestY2 = 0, bestW = 0;
-      for (const strip of block.strips) {
-        if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
-        const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
-        const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
-        const sw = x2 - x1;
-        if (sw > bestW) {
-          bestW = sw;
-          bestX1 = x1;
-          bestX2 = x2;
-          bestY1 = bytesToY(strip.y_offset + block.size);
-          bestY2 = bytesToY(strip.y_offset);
-        }
-      }
-      if (bestW < 100) continue;
-      const bh = bestY2 - bestY1;
-      if (bh < 14) continue;
-
-      const label = block.top_frame || `0x${block.addr.toString(16)}`;
-      const maxChars = Math.floor(bestW / 6.5);
-      const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
-      ctx.fillStyle = "#fff";
-      ctx.fillText(text, bestX1 + 3, bestY1 + 11);
-      if (bh > 26) {
-        ctx.fillStyle = "rgba(255,255,255,0.7)";
-        ctx.fillText(formatBytes(block.size), bestX1 + 3, bestY1 + 23);
+      // WebGL: draw strips (one draw call, GPU-accelerated)
+      if (glRef.current) {
+        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes);
       }
 
-      // selection border
-      if (selectedBlock?.addr === block.addr) {
+      // 2D overlay canvas: clear transparent, then fill margins opaque
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillRect(0, 0, width, MARGIN.top);
+      ctx.fillRect(0, MARGIN.top + plotH, width, height - MARGIN.top - plotH);
+      ctx.fillRect(0, MARGIN.top, MARGIN.left, plotH);
+      ctx.fillRect(MARGIN.left + plotW, MARGIN.top, MARGIN.right, plotH);
+
+      const yScale = plotH / maxBytes;
+
+      // Selection highlight
+      if (selectedBlock) {
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 2;
-        ctx.strokeRect(bestX1, bestY1, bestX2 - bestX1, bh);
+        for (const strip of selectedBlock.strips) {
+          if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
+          const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
+          const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
+          if (x2 - x1 < 0.3) continue;
+          const y1 = bytesToY(strip.y_offset + selectedBlock.size);
+          const y2 = bytesToY(strip.y_offset);
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        }
+      }
+
+      // Block labels
+      ctx.globalAlpha = 0.9;
+      ctx.font = "10px monospace";
+      for (const block of blocks) {
+        let bestX1 = 0, bestY1 = 0, bestW = 0, bestH = 0;
+        for (const strip of block.strips) {
+          if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
+          const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
+          const sw = Math.min(timeToX(strip.t_end), MARGIN.left + plotW) - x1;
+          if (sw > bestW) {
+            bestW = sw; bestX1 = x1;
+            bestY1 = bytesToY(strip.y_offset + block.size);
+            bestH = bytesToY(strip.y_offset) - bestY1;
+          }
+        }
+        if (bestW < 100 || bestH < 14) continue;
+        const label = block.top_frame || `0x${block.addr.toString(16)}`;
+        const maxChars = Math.floor(bestW / 6.5);
+        const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
+        ctx.fillStyle = "#fff";
+        ctx.fillText(text, bestX1 + 3, bestY1 + 11);
+        if (bestH > 26) { ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.fillText(formatBytes(block.size), bestX1 + 3, bestY1 + 23); }
+      }
+      ctx.globalAlpha = 1;
+
+      // Pending-free red overlay
+      for (const block of blocks) {
+        if (block.free_requested_us <= 0) continue;
+        if (block.size * yScale < 0.5) continue;
+        ctx.fillStyle = "rgba(239,68,68,0.35)";
+        for (const strip of block.strips) {
+          const os = Math.max(strip.t_start, block.free_requested_us);
+          if (os >= strip.t_end || strip.t_end <= tMin || os >= tMax) continue;
+          const x1 = Math.max(timeToX(os), MARGIN.left);
+          const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
+          if (x2 - x1 < 0.5) continue;
+          ctx.fillRect(x1, bytesToY(strip.y_offset + block.size), x2 - x1, bytesToY(strip.y_offset) - bytesToY(strip.y_offset + block.size));
+        }
+      }
+
+      // Anomaly flags
+      for (const anomaly of anomalies) {
+        if (anomaly.alloc_us > tMax || anomaly.alloc_us < tMin) continue;
+        const x = timeToX(anomaly.alloc_us);
+        if (x < MARGIN.left || x > MARGIN.left + plotW) continue;
+        const color = ANOMALY_COLORS[anomaly.type] || "#ef4444";
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x, MARGIN.top); ctx.lineTo(x - FLAG_SIZE / 2, MARGIN.top - FLAG_SIZE); ctx.lineTo(x + FLAG_SIZE / 2, MARGIN.top - FLAG_SIZE);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = color; ctx.globalAlpha = 0.3; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.moveTo(x, MARGIN.top); ctx.lineTo(x, MARGIN.top + plotH); ctx.stroke();
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+      }
+
+      // Y axis
+      ctx.fillStyle = "#666"; ctx.font = "11px monospace"; ctx.textAlign = "right";
+      for (let i = 0; i <= 5; i++) {
+        const b = (maxBytes / 5) * i, y = bytesToY(b);
+        ctx.fillText(formatBytes(b), MARGIN.left - 8, y + 4);
+        ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(MARGIN.left, y); ctx.lineTo(MARGIN.left + plotW, y); ctx.stroke();
+      }
+      // X axis
+      ctx.textAlign = "center"; ctx.fillStyle = "#666";
+      const xTicks = Math.min(8, Math.floor(plotW / 100));
+      for (let i = 0; i <= xTicks; i++) {
+        const t = tMin + ((tMax - tMin) / xTicks) * i;
+        ctx.fillText(`${((t - data.time_min) / 1e6).toFixed(2)}s`, timeToX(t), height - 8);
+      }
+      // Peak line
+      const peakY = bytesToY(data.peak_bytes);
+      if (peakY >= MARGIN.top && peakY <= MARGIN.top + plotH) {
+        ctx.strokeStyle = "rgba(239,68,68,0.4)"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(MARGIN.left, peakY); ctx.lineTo(MARGIN.left + plotW, peakY); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = "#ef4444"; ctx.textAlign = "left"; ctx.font = "10px monospace";
+        ctx.fillText(`peak: ${formatBytes(data.peak_bytes)}`, MARGIN.left + 4, peakY - 4);
+      }
+      // Border
+      ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.strokeRect(MARGIN.left, MARGIN.top, plotW, plotH);
+
+    // --- Overlay effects (hover, rulers, selection) ---
+
+    // Hover range
+    if ((hoverBlock || hoverAnomaly) && !selRect) {
+      const hb = hoverBlock || blocks.find((b) => b.addr === hoverAnomaly?.anomaly.addr);
+      if (hb) {
+        const rx1 = Math.max(timeToX(hb.alloc_us), MARGIN.left);
+        const rx2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
+        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillRect(rx1, MARGIN.top, rx2 - rx1, plotH);
+        ctx.strokeStyle = "rgba(255,255,255,0.3)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        if (rx1 >= MARGIN.left) { ctx.moveTo(rx1, MARGIN.top); ctx.lineTo(rx1, MARGIN.top + plotH); }
+        if (rx2 <= MARGIN.left + plotW) { ctx.moveTo(rx2, MARGIN.top); ctx.lineTo(rx2, MARGIN.top + plotH); }
+        ctx.stroke(); ctx.setLineDash([]);
+        if (hb.free_requested_us > 0 && hb.free_requested_us < hb.free_us) {
+          const px1 = Math.max(timeToX(hb.free_requested_us), MARGIN.left);
+          const px2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
+          ctx.fillStyle = "rgba(239,68,68,0.10)"; ctx.fillRect(px1, MARGIN.top, px2 - px1, plotH);
+          ctx.strokeStyle = "rgba(239,68,68,0.5)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          if (px1 >= MARGIN.left) { ctx.moveTo(px1, MARGIN.top); ctx.lineTo(px1, MARGIN.top + plotH); }
+          if (px2 <= MARGIN.left + plotW) { ctx.moveTo(px2, MARGIN.top); ctx.lineTo(px2, MARGIN.top + plotH); }
+          ctx.stroke(); ctx.setLineDash([]);
+        }
       }
     }
-    ctx.globalAlpha = 1;
 
-    // Y axis
-    ctx.fillStyle = "#666";
-    ctx.font = "11px monospace";
-    ctx.textAlign = "right";
-    const yTicks = 5;
-    for (let i = 0; i <= yTicks; i++) {
-      const b = (maxBytes / yTicks) * i;
-      const y = bytesToY(b);
-      ctx.fillText(formatBytes(b), MARGIN.left - 8, y + 4);
-      ctx.strokeStyle = "#1a1a1a";
-      ctx.lineWidth = 0.5;
-      ctx.beginPath();
-      ctx.moveTo(MARGIN.left, y);
-      ctx.lineTo(MARGIN.left + plotW, y);
-      ctx.stroke();
+    // Ruler
+    if (ruler) {
+      const { type, startPx, endPx } = ruler;
+      ctx.save(); ctx.lineWidth = 1.5;
+      if (type === "vertical") {
+        const x = startPx.x, yTop = Math.min(startPx.y, endPx.y), yBot = Math.max(startPx.y, endPx.y);
+        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,220,50,0.35)";
+        ctx.beginPath(); ctx.moveTo(MARGIN.left, yTop); ctx.lineTo(MARGIN.left + plotW, yTop);
+        ctx.moveTo(MARGIN.left, yBot); ctx.lineTo(MARGIN.left + plotW, yBot); ctx.stroke();
+        ctx.setLineDash([]); ctx.strokeStyle = "rgba(255,220,50,0.9)";
+        ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot);
+        ctx.moveTo(x - 6, yTop); ctx.lineTo(x + 6, yTop); ctx.moveTo(x - 6, yBot); ctx.lineTo(x + 6, yBot); ctx.stroke();
+        const bTop = yToBytes(yTop), bBot = yToBytes(yBot);
+        drawPill(ctx, formatBytes(bTop), x + 50, yTop); drawPill(ctx, formatBytes(bBot), x + 50, yBot);
+        drawPill(ctx, `\u0394 ${formatBytes(Math.abs(bTop - bBot))}`, x + 50, (yTop + yBot) / 2);
+      } else {
+        const y = startPx.y, xL = Math.min(startPx.x, endPx.x), xR = Math.max(startPx.x, endPx.x);
+        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,220,50,0.35)";
+        ctx.beginPath(); ctx.moveTo(xL, MARGIN.top); ctx.lineTo(xL, MARGIN.top + plotH);
+        ctx.moveTo(xR, MARGIN.top); ctx.lineTo(xR, MARGIN.top + plotH); ctx.stroke();
+        ctx.setLineDash([]); ctx.strokeStyle = "rgba(255,220,50,0.9)";
+        ctx.beginPath(); ctx.moveTo(xL, y); ctx.lineTo(xR, y);
+        ctx.moveTo(xL, y - 6); ctx.lineTo(xL, y + 6); ctx.moveTo(xR, y - 6); ctx.lineTo(xR, y + 6); ctx.stroke();
+        const tL = xToTime(xL), tR = xToTime(xR), delta = Math.abs(tR - tL);
+        drawPill(ctx, formatTime(tL - data.time_min), xL, y - 16); drawPill(ctx, formatTime(tR - data.time_min), xR, y - 16);
+        drawPill(ctx, `\u0394 ${formatTime(delta)}`, (xL + xR) / 2, y + 16);
+      }
+      ctx.restore();
     }
 
-    // X axis
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#666";
-    const duration = tMax - tMin;
-    const xTicks = Math.min(8, Math.floor(plotW / 100));
-    for (let i = 0; i <= xTicks; i++) {
-      const t = tMin + (duration / xTicks) * i;
-      const x = timeToX(t);
-      const relSec = (t - data.time_min) / 1e6;
-      ctx.fillText(`${relSec.toFixed(2)}s`, x, height - 8);
+    // Selection rectangle
+    if (selRect) {
+      const sx1 = Math.min(selRect.x1, selRect.x2), sy1 = Math.min(selRect.y1, selRect.y2);
+      const sw = Math.abs(selRect.x2 - selRect.x1), sh = Math.abs(selRect.y2 - selRect.y1);
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(MARGIN.left, MARGIN.top, plotW, sy1 - MARGIN.top);
+      ctx.fillRect(MARGIN.left, sy1 + sh, plotW, MARGIN.top + plotH - sy1 - sh);
+      ctx.fillRect(MARGIN.left, sy1, sx1 - MARGIN.left, sh);
+      ctx.fillRect(sx1 + sw, sy1, MARGIN.left + plotW - sx1 - sw, sh);
+      ctx.strokeStyle = "rgba(59,130,246,0.8)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+      ctx.strokeRect(sx1, sy1, sw, sh); ctx.setLineDash([]);
     }
+  }, [data, blocks, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
 
-    // peak line
-    const peakY = bytesToY(data.peak_bytes);
-    ctx.strokeStyle = "rgba(239,68,68,0.4)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(MARGIN.left, peakY);
-    ctx.lineTo(MARGIN.left + plotW, peakY);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = "#ef4444";
-    ctx.textAlign = "left";
-    ctx.font = "10px monospace";
-    ctx.fillText(`peak: ${formatBytes(data.peak_bytes)}`, MARGIN.left + 4, peakY - 4);
-
-    // border
-    ctx.strokeStyle = "#333";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(MARGIN.left, MARGIN.top, plotW, plotH);
-  }, [data, blocks, viewRange, width, height, timeToX, bytesToY, maxBytes, plotW, plotH, selectedBlock]);
-
-  // hit test: find block whose strip contains the mouse point
+  // hit test
   const hitTest = useCallback(
     (mx: number, my: number): TimelineBlock | null => {
       if (mx < MARGIN.left || mx > MARGIN.left + plotW) return null;
       if (my < MARGIN.top || my > MARGIN.top + plotH) return null;
-
       const t = xToTime(mx);
       const mouseBytes = yToBytes(my);
       if (mouseBytes < 0) return null;
-
-      // Iterate in reverse (higher idx = smaller = drawn on top) for correct z-order
       for (let bi = blocks.length - 1; bi >= 0; bi--) {
         const block = blocks[bi];
         for (const strip of block.strips) {
@@ -239,7 +390,7 @@ export default function PhaseTimeline({
           if (mouseBytes >= strip.y_offset && mouseBytes < strip.y_offset + block.size) {
             return block;
           }
-          break; // only one strip active per block at any time
+          break;
         }
       }
       return null;
@@ -253,161 +404,280 @@ export default function PhaseTimeline({
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
 
-      if (isPanning && panStartRef.current) {
-        const dx = mx - panStartRef.current.x;
-        const [rMin, rMax] = panStartRef.current.range;
-        const tPerPx = (rMax - rMin) / plotW;
-        const dt = -dx * tPerPx;
-        const newMin = Math.max(data.time_min, rMin + dt);
-        const newMax = Math.min(data.time_max, rMax + dt);
-        if (newMax - newMin > 1000) setViewRange([newMin, newMax]);
+      // Ruler dragging — clamp to plot area
+      if (rulerDragRef.current) {
+        const { type, startPx } = rulerDragRef.current;
+        const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
+        const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
+        const endPx = type === "vertical" ? { x: startPx.x, y: cy } : { x: cx, y: startPx.y };
+        setRuler({ type, startPx, endPx });
         return;
       }
+
+      // Selection rectangle dragging
+      if (selStartRef.current) {
+        const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
+        const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
+        setSelRect({ x1: selStartRef.current.x, y1: selStartRef.current.y, x2: cx, y2: cy });
+        return;
+      }
+
+      // Check flag hit (top margin area)
+      if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
+        for (const anomaly of anomalies) {
+          const fx = timeToX(anomaly.alloc_us);
+          if (Math.abs(mx - fx) < FLAG_SIZE) {
+            setHoverAnomaly({ anomaly, x: mx, y: my });
+            setHoverBlock(null);
+            setHoverPos(null);
+            return;
+          }
+        }
+      }
+      setHoverAnomaly(null);
 
       const hit = hitTest(mx, my);
       setHoverBlock(hit);
       setHoverPos(hit ? { x: mx, y: my } : null);
     },
-    [isPanning, hitTest, data, plotW],
+    [hitTest, data, plotW, plotH, anomalies, timeToX],
   );
 
-
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
-      const rect = e.currentTarget.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const fraction = Math.max(0, Math.min(1, (mx - MARGIN.left) / plotW));
-      const [tMin, tMax] = viewRange;
-      const range = tMax - tMin;
-      const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
-      const newRange = Math.max(10000, Math.min(data.time_max - data.time_min, range * factor));
-      const pivot = tMin + fraction * range;
-      const newMin = Math.max(data.time_min, pivot - fraction * newRange);
-      const newMax = Math.min(data.time_max, newMin + newRange);
-      setViewRange([newMin, newMax]);
-    },
-    [viewRange, data, plotW],
-  );
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      const [tMin, tMax] = viewRange;
-      const range = tMax - tMin;
-      const panStep = range * 0.15;
-      const fullRange = data.time_max - data.time_min;
+      const key = e.key.toLowerCase();
+      keysDownRef.current.add(key);
 
-      let newMin = tMin;
-      let newMax = tMax;
-
-      const atFullZoom = range >= fullRange * 0.99;
-
-      switch (e.key.toLowerCase()) {
-        case "a":
-        case "arrowleft":
-          if (atFullZoom) {
-            newMax = tMin + range * 0.6;
-            newMin = tMin;
-          } else {
-            newMin = Math.max(data.time_min, tMin - panStep);
-            newMax = newMin + range;
-          }
-          break;
-        case "d":
-        case "arrowright":
-          if (atFullZoom) {
-            newMin = tMax - range * 0.6;
-            newMax = tMax;
-          } else {
-            newMax = Math.min(data.time_max, tMax + panStep);
-            newMin = newMax - range;
-          }
-          break;
-        case "w":
-        case "arrowup": {
-          const newRange = Math.max(10000, range / 1.4);
-          const center = (tMin + tMax) / 2;
-          newMin = Math.max(data.time_min, center - newRange / 2);
-          newMax = Math.min(data.time_max, newMin + newRange);
-          break;
-        }
-        case "s":
-        case "arrowdown": {
-          const newRange = Math.min(fullRange, range * 1.4);
-          const center = (tMin + tMax) / 2;
-          newMin = Math.max(data.time_min, center - newRange / 2);
-          newMax = Math.min(data.time_max, newMin + newRange);
-          break;
-        }
-        case "r":
-          newMin = data.time_min;
-          newMax = data.time_max;
-          break;
-        default:
-          return;
+      // Escape dismisses ruler
+      if (key === "escape") {
+        setRuler(null);
+        rulerDragRef.current = null;
+        e.preventDefault();
+        return;
       }
-      e.preventDefault();
-      setViewRange([newMin, newMax]);
+
+      // Ctrl+C / Cmd+C copies stack trace
+      if (key === "c" && (e.ctrlKey || e.metaKey) && detail) {
+        const text = detail.frames
+          .filter(f => f.filename !== "??" && !f.name.includes("CUDACachingAllocator") && !f.filename.includes("memory_snapshot"))
+          .map(f => `${f.name} @ ${f.filename}:${f.line}`)
+          .join("\n");
+        navigator.clipboard.writeText(`${formatBytes(detail.size)} 0x${detail.addr.toString(16)}\n${text}`);
+        e.preventDefault();
+        return;
+      }
+
+      // Navigation keys are handled by rAF loop below
+      if ("adws".includes(key) || key.startsWith("arrow")) {
+        e.preventDefault();
+      }
     },
-    [viewRange, data],
+    [detail],
   );
+
+  const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
+    keysDownRef.current.delete(e.key.toLowerCase());
+  }, []);
+
+  // Continuous smooth navigation via rAF while WASD/arrows are held
+  const navRafRef = useRef<number>(0);
+  const viewRangeRef = useRef(viewRange);
+  viewRangeRef.current = viewRange;
+
+  useEffect(() => {
+    let running = true;
+    function tick() {
+      if (!running) return;
+      const keys = keysDownRef.current;
+      const hasNav = keys.has("a") || keys.has("d") || keys.has("w") || keys.has("s")
+        || keys.has("arrowleft") || keys.has("arrowright") || keys.has("arrowup") || keys.has("arrowdown");
+      if (hasNav) {
+        const [tMin, tMax] = viewRangeRef.current;
+        const range = tMax - tMin;
+        const fullRange = data.time_max - data.time_min;
+        const panRate = range * 0.02; // 2% per frame (~60fps = smooth scroll)
+        const zoomRate = 0.97; // zoom in 3% per frame
+        let newMin = tMin, newMax = tMax;
+
+        if (keys.has("a") || keys.has("arrowleft")) {
+          newMin = Math.max(data.time_min, tMin - panRate);
+          newMax = newMin + range;
+        }
+        if (keys.has("d") || keys.has("arrowright")) {
+          newMax = Math.min(data.time_max, tMax + panRate);
+          newMin = newMax - range;
+        }
+        if (keys.has("w") || keys.has("arrowup")) {
+          const nr = range * zoomRate;
+          if (nr > 100) { // minimum 100us visible range
+            const c = (newMin + newMax) / 2;
+            newMin = Math.max(data.time_min, c - nr / 2);
+            newMax = Math.min(data.time_max, newMin + nr);
+          }
+        }
+        if (keys.has("s") || keys.has("arrowdown")) {
+          const nr = Math.min(fullRange, range / zoomRate);
+          const c = (newMin + newMax) / 2;
+          newMin = Math.max(data.time_min, c - nr / 2);
+          newMax = Math.min(data.time_max, newMin + nr);
+        }
+
+        if (newMin !== tMin || newMax !== tMax) {
+          setViewRange([newMin, newMax]);
+        }
+      }
+      navRafRef.current = requestAnimationFrame(tick);
+    }
+    navRafRef.current = requestAnimationFrame(tick);
+    return () => { running = false; cancelAnimationFrame(navRafRef.current); };
+  }, [data.time_min, data.time_max]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (e.button === 0) {
-        setIsPanning(true);
-        panStartRef.current = {
-          x: e.clientX - e.currentTarget.getBoundingClientRect().left,
-          range: [...viewRange] as [number, number],
-        };
+      if (e.button !== 0) return;
+      (e.currentTarget as HTMLElement).focus();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      // Start ruler if R or T is held — clamp to plot area
+      const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
+      const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
+      if (keysDownRef.current.has("r")) {
+        rulerDragRef.current = { type: "vertical", startPx: { x: cx, y: cy } };
+        return;
       }
+      if (keysDownRef.current.has("t")) {
+        rulerDragRef.current = { type: "horizontal", startPx: { x: cx, y: cy } };
+        return;
+      }
+
+      // Start selection rectangle
+      const sx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
+      const sy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
+      selStartRef.current = { x: sx, y: sy };
     },
-    [viewRange],
+    [],
   );
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent) => {
-      if (panStartRef.current) {
+      // Finish ruler drag
+      if (rulerDragRef.current) {
+        rulerDragRef.current = null;
+        return;
+      }
+
+      if (selStartRef.current) {
         const rect = e.currentTarget.getBoundingClientRect();
         const mx = e.clientX - rect.left;
-        const moved = Math.abs(mx - panStartRef.current.x);
-        if (moved < 3) {
-          const hit = hitTest(mx, e.clientY - rect.top);
+        const my = e.clientY - rect.top;
+        const dx = Math.abs(mx - selStartRef.current.x);
+        const dy = Math.abs(my - selStartRef.current.y);
+
+        if (dx > 5 || dy > 5) {
+          // Selection rectangle → zoom into region
+          const cx1 = Math.max(MARGIN.left, Math.min(selStartRef.current.x, mx));
+          const cx2 = Math.min(MARGIN.left + plotW, Math.max(selStartRef.current.x, mx));
+          const newTMin = xToTime(cx1);
+          const newTMax = xToTime(cx2);
+          if (newTMax - newTMin > 100) {
+            setViewRange([newTMin, newTMax]);
+          }
+        } else {
+          // Click — flag or block selection
+          if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
+            for (const anomaly of anomalies) {
+              const fx = timeToX(anomaly.alloc_us);
+              if (Math.abs(mx - fx) < FLAG_SIZE) {
+                const block = blocks.find((b) => b.addr === anomaly.addr) ?? null;
+                setSelectedBlock(block);
+                setDetail(null);
+                if (block) {
+                  const d = useDataStore.getState().getDetail(currentRank, block.addr);
+                  if (d) setDetail(d);
+                }
+                selStartRef.current = null;
+                setSelRect(null);
+                return;
+              }
+            }
+          }
+          const hit = hitTest(mx, my);
           setSelectedBlock(hit);
           setDetail(null);
           if (hit) {
-            fetch(`/api/allocation_detail/${currentRank}/${hit.addr}`)
-              .then((r) => r.json())
-              .then(setDetail);
+            const d = useDataStore.getState().getDetail(currentRank, hit.addr);
+            if (d) setDetail(d);
           }
         }
       }
-      setIsPanning(false);
-      panStartRef.current = null;
+      selStartRef.current = null;
+      setSelRect(null);
     },
-    [hitTest, currentRank],
+    [hitTest, currentRank, anomalies, blocks, timeToX],
   );
+
+  const cursorStyle = rulerDragRef.current
+    ? (rulerDragRef.current.type === "vertical" ? "ns-resize" : "ew-resize")
+    : "crosshair";
 
   return (
     <div>
-      <div style={{ position: "relative", cursor: isPanning ? "grabbing" : "crosshair" }}>
+      <div style={{ position: "relative", cursor: cursorStyle }}>
+        <canvas
+          ref={glCanvasRef}
+          style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}
+        />
         <canvas
           ref={canvasRef}
+          style={{ position: "relative", background: "transparent" }}
           tabIndex={0}
           onKeyDown={handleKeyDown}
+          onKeyUp={handleKeyUp}
           onMouseMove={handleMouseMove}
-          onWheel={handleWheel}
+
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
           onMouseLeave={() => {
             setHoverBlock(null);
             setHoverPos(null);
-            setIsPanning(false);
+            setHoverAnomaly(null);
+            selStartRef.current = null;
+            setSelRect(null);
+            if (rulerDragRef.current) rulerDragRef.current = null;
           }}
           onDoubleClick={() => setViewRange([data.time_min, data.time_max])}
         />
+        {/* anomaly flag tooltip */}
+        {hoverAnomaly && (
+          <div
+            style={{
+              position: "absolute",
+              left: Math.min(hoverAnomaly.x + 12, width - 300),
+              top: Math.max(hoverAnomaly.y + 8, 4),
+              background: "rgba(30,0,0,0.95)",
+              border: `1px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`,
+              borderRadius: 4,
+              padding: "6px 10px",
+              fontSize: 12,
+              color: "#ddd",
+              pointerEvents: "none",
+              maxWidth: 360,
+              fontFamily: "monospace",
+              lineHeight: 1.5,
+            }}
+          >
+            <div style={{ color: ANOMALY_COLORS[hoverAnomaly.anomaly.type], fontWeight: 600 }}>
+              {hoverAnomaly.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect"}
+            </div>
+            <div>{formatBytes(hoverAnomaly.anomaly.size)} {hoverAnomaly.anomaly.label}</div>
+            <div style={{ color: "#888" }}>{hoverAnomaly.anomaly.top_frame}</div>
+          </div>
+        )}
         {/* hover tooltip */}
-        {hoverBlock && hoverPos && (
+        {hoverBlock && hoverPos && !hoverAnomaly && (
           <div
             style={{
               position: "absolute",
@@ -434,7 +704,7 @@ export default function PhaseTimeline({
           </div>
         )}
         <div style={{ position: "absolute", bottom: 44, right: 24, fontSize: 11, color: "#444" }}>
-          WASD/arrows=navigate W/S=zoom R=reset click=detail
+          WASD=navigate W/S=zoom R=reset R+drag=mem T+drag=time Esc=clear Ctrl+C=copy
         </div>
       </div>
 
@@ -470,6 +740,7 @@ export default function PhaseTimeline({
                 0x{detail.addr.toString(16)}
               </span>
             </div>
+            <div style={{ color: "#666", fontSize: 11 }}>Ctrl+C to copy trace</div>
           </div>
           <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 1.6 }}>
             {detail.frames
@@ -497,27 +768,4 @@ export default function PhaseTimeline({
       )}
     </div>
   );
-}
-
-interface PairedAnnotation {
-  name: string;
-  start: number;
-  end: number;
-}
-
-function pairAnnotations(annotations: TimelineAnnotation[]): PairedAnnotation[] {
-  const stack: Map<string, number[]> = new Map();
-  const result: PairedAnnotation[] = [];
-  for (const a of annotations) {
-    if (a.stage === "START") {
-      if (!stack.has(a.name)) stack.set(a.name, []);
-      stack.get(a.name)!.push(a.time_us);
-    } else if (a.stage === "END") {
-      const starts = stack.get(a.name);
-      if (starts && starts.length > 0) {
-        result.push({ name: a.name, start: starts.pop()!, end: a.time_us });
-      }
-    }
-  }
-  return result;
 }
