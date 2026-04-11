@@ -1,69 +1,175 @@
-import type { ReactNode } from "react";
-import { Layout as AntLayout, Select, Spin, Button } from "antd";
-import { FolderOpenOutlined } from "@ant-design/icons";
+import { useTransition, type ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
 import { formatBytes } from "../utils";
-
-const { Header, Content } = AntLayout;
 
 export default function Layout({ children }: { children: ReactNode }) {
   const { ranks, currentRank, summary, loading, setCurrentRank } = useDataStore();
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
-  const handleReset = () => { resetFiles(); resetData(); };
+  const [isPending, startTransition] = useTransition();
+  const handleReset = () => {
+    resetFiles();
+    resetData();
+  };
+  const handleRankChange = (r: number) =>
+    startTransition(() => setCurrentRank(r));
+
+  const utilPct = summary && summary.total_reserved > 0
+    ? ((summary.total_allocated / summary.total_reserved) * 100).toFixed(1)
+    : "—";
 
   return (
-    <AntLayout style={{ minHeight: "100vh", background: "#0a0a0a" }}>
-      <Header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          background: "#141414",
-          borderBottom: "1px solid #303030",
-          padding: "0 24px",
-        }}
-      >
-        <Button
-          type="text"
-          icon={<FolderOpenOutlined />}
-          onClick={handleReset}
-          style={{ color: "#888" }}
-          title="Open another directory"
-        />
-        <span style={{ fontWeight: 700, fontSize: 16, color: "#fff" }}>
-          memviz-neo
-        </span>
-        <Select
-          value={currentRank}
-          onChange={setCurrentRank}
-          style={{ width: 110 }}
-          options={ranks.map((r) => ({ label: `Rank ${r}`, value: r }))}
-        />
+    <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
+      <header className="app-header">
+        <div className="app-header-left">
+          <button
+            className="btn-ghost"
+            onClick={handleReset}
+            title="Open another directory"
+            style={{
+              border: "1px solid var(--border)",
+              background: "transparent",
+              cursor: "pointer",
+              padding: "6px 10px",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--fg-muted)",
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+            }}
+          >
+            ← Open
+          </button>
+          <div className="app-brand display">
+            memviz<span style={{ color: "var(--accent)" }}>/neo</span>
+          </div>
+          {ranks.length > 0 && (
+            <div className="seg" style={{ marginLeft: 8, opacity: isPending ? 0.6 : 1 }}>
+              <select
+                value={currentRank}
+                onChange={(e) => handleRankChange(Number(e.target.value))}
+              >
+                {ranks.map((r) => (
+                  <option key={r} value={r}>
+                    rank {String(r).padStart(2, "0")}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
         {summary && (
-          <div style={{ display: "flex", gap: 16, marginLeft: "auto", color: "#888", fontSize: 13 }}>
-            <span>
-              Active: {formatBytes(summary.active_bytes)}
-            </span>
-            <span>
-              Inactive: {formatBytes(summary.inactive_bytes)}
-            </span>
-            <span>
-              {formatBytes(summary.total_allocated)} / {formatBytes(summary.total_reserved)}
-            </span>
+          <div className="app-header-stats">
+            <HeaderStat label="Active" value={formatBytes(summary.active_bytes)} />
+            <div className="divider-v" />
+            <HeaderStat label="Inactive" value={formatBytes(summary.inactive_bytes)} />
+            <div className="divider-v" />
+            <HeaderStat
+              label="Allocated"
+              value={formatBytes(summary.total_allocated)}
+              sub={`/ ${formatBytes(summary.total_reserved)}`}
+            />
+            <div className="divider-v" />
+            <HeaderStat label="Util" value={`${utilPct}%`} accent />
           </div>
         )}
-      </Header>
-      <Content style={{ padding: 20 }}>
+      </header>
+
+      <main>
         {loading ? (
-          <div style={{ display: "flex", justifyContent: "center", paddingTop: 100 }}>
-            <Spin size="large" />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              paddingTop: 200,
+              gap: 16,
+            }}
+          >
+            <div className="spinner" />
+            <div
+              className="mono"
+              style={{ fontSize: 11, color: "var(--fg-faint)", letterSpacing: "0.1em" }}
+            >
+              LOADING
+            </div>
           </div>
         ) : (
           children
         )}
-      </Content>
-    </AntLayout>
+      </main>
+
+      <style>{`
+        .app-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: var(--s5);
+          padding: 20px var(--s6);
+          background: var(--bg);
+          border-bottom: 1px solid var(--divider);
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          backdrop-filter: blur(8px);
+        }
+        .app-header-left {
+          display: flex;
+          align-items: center;
+          gap: var(--s4);
+        }
+        .app-brand {
+          font-size: 18px;
+          font-weight: 600;
+          letter-spacing: -0.02em;
+          color: var(--fg);
+        }
+        .app-header-stats {
+          display: flex;
+          align-items: stretch;
+          gap: var(--s5);
+        }
+        .hs-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .hs-label {
+          font-family: var(--font-display);
+          font-size: 9px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--fg-faint);
+        }
+        .hs-value {
+          font-family: var(--font-mono);
+          font-size: 14px;
+          color: var(--fg);
+          font-variant-numeric: tabular-nums;
+        }
+        .hs-value.hl { color: var(--accent); }
+        .hs-sub { font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); margin-left: 4px; }
+      `}</style>
+    </div>
+  );
+}
+
+function HeaderStat({
+  label,
+  value,
+  sub,
+  accent,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  accent?: boolean;
+}) {
+  return (
+    <div className="hs-item">
+      <div className="hs-label">{label}</div>
+      <div className={"hs-value" + (accent ? " hl" : "")}>
+        {value}
+        {sub && <span className="hs-sub">{sub}</span>}
+      </div>
+    </div>
   );
 }

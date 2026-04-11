@@ -20,12 +20,26 @@ interface Props {
 }
 
 const ANOMALY_COLORS: Record<string, string> = {
-  pending_free: "#ef4444",
-  leak: "#f59e0b",
+  pending_free: "#f87171",
+  leak: "#fbbf24",
 };
 const FLAG_SIZE = 8;
+// Cap flags drawn on the timeline to avoid visual overload.
+// The panel still shows all anomalies. Sorted by severity, so we keep the worst.
+const TIMELINE_FLAG_LIMIT = 40;
 
-const MARGIN = { top: 20, right: 20, bottom: 40, left: 80 };
+// Visual tokens — mirror theme.css for canvas drawing
+const COLOR_BG = "#0a0a0b";
+const COLOR_GRID = "#17171a";
+const COLOR_AXIS = "#52525b";
+const COLOR_AXIS_DIM = "#3f3f46";
+const COLOR_ACCENT = "#d9f99d";
+const COLOR_PEAK = "#f87171";
+const FONT_MONO = '11px "JetBrains Mono", ui-monospace, monospace';
+const FONT_MONO_SM = '10px "JetBrains Mono", ui-monospace, monospace';
+const FONT_DISPLAY_SM = '10px "Space Grotesk", sans-serif';
+
+const MARGIN = { top: 24, right: 24, bottom: 44, left: 88 };
 
 
 type RulerType = "vertical" | "horizontal";
@@ -42,16 +56,14 @@ function formatTime(us: number): string {
 }
 
 function drawPill(ctx: CanvasRenderingContext2D, text: string, cx: number, cy: number) {
-  ctx.font = "11px monospace";
+  ctx.font = FONT_MONO;
   const tw = ctx.measureText(text).width;
-  const px = 5, py = 3;
+  const px = 6, py = 4;
   const rw = tw + px * 2, rh = 14 + py * 2;
   const rx = cx - rw / 2, ry = cy - rh / 2;
-  ctx.fillStyle = "rgba(255,220,50,0.92)";
-  ctx.beginPath();
-  ctx.roundRect(rx, ry, rw, rh, 4);
-  ctx.fill();
-  ctx.fillStyle = "#000";
+  ctx.fillStyle = COLOR_ACCENT;
+  ctx.fillRect(rx, ry, rw, rh);
+  ctx.fillStyle = "#0a0a0b";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, cx, cy);
@@ -126,8 +138,14 @@ export default function PhaseTimeline({
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
+  const maxBytesFull = useDataStore((s) => s.timelineMaxBytesFull);
+
   const maxBytes = useMemo(() => {
     const [tMin, tMax] = viewRange;
+    // Fast path: full view — use pre-computed per-rank max, skip 30k iterations
+    if (tMin <= data.time_min && tMax >= data.time_max && maxBytesFull > 0) {
+      return maxBytesFull;
+    }
     let maxB = 0;
     for (const block of blocks) {
       for (const strip of block.strips) {
@@ -137,7 +155,7 @@ export default function PhaseTimeline({
       }
     }
     return (maxB || data.peak_bytes) * 1.1;
-  }, [viewRange, blocks, data.peak_bytes]);
+  }, [viewRange, blocks, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
 
   useEffect(() => {
     setViewRange([data.time_min, data.time_max]);
@@ -163,18 +181,20 @@ export default function PhaseTimeline({
     [maxBytes, plotH],
   );
 
-  // --- WebGL strip upload (once per data change) ---
+  // --- WebGL strip upload (zero-copy from pre-packed buffer) ---
+  const stripBuffer = useDataStore((s) => s.timelineStripBuffer);
+  const stripCount = useDataStore((s) => s.timelineStripCount);
   useEffect(() => {
     const glCanvas = glCanvasRef.current;
-    if (!glCanvas) return;
+    if (!glCanvas || !stripBuffer) return;
     if (!glRef.current) glRef.current = initGL(glCanvas);
     if (!glRef.current) return;
-    const key = `${currentRank}-${blocks.length}-${blocks[0]?.addr}-${blocks[0]?.strips.length}`;
+    const key = `${currentRank}-${stripCount}`;
     if (key !== stripKeyRef.current) {
-      uploadStrips(glRef.current, blocks);
+      uploadStrips(glRef.current, stripBuffer, stripCount);
       stripKeyRef.current = key;
     }
-  }, [blocks, currentRank]);
+  }, [stripBuffer, stripCount, currentRank]);
 
   // --- Render: WebGL strips + 2D overlay ---
   useEffect(() => {
@@ -194,12 +214,12 @@ export default function PhaseTimeline({
 
       // WebGL: draw strips (one draw call, GPU-accelerated)
       if (glRef.current) {
-        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes);
+        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes, data.time_min);
       }
 
       // 2D overlay canvas: clear transparent, then fill margins opaque
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = "#0a0a0a";
+      ctx.fillStyle = COLOR_BG;
       ctx.fillRect(0, 0, width, MARGIN.top);
       ctx.fillRect(0, MARGIN.top + plotH, width, height - MARGIN.top - plotH);
       ctx.fillRect(0, MARGIN.top, MARGIN.left, plotH);
@@ -209,7 +229,7 @@ export default function PhaseTimeline({
 
       // Selection highlight
       if (selectedBlock) {
-        ctx.strokeStyle = "#fff";
+        ctx.strokeStyle = COLOR_ACCENT;
         ctx.lineWidth = 2;
         for (const strip of selectedBlock.strips) {
           if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
@@ -223,8 +243,8 @@ export default function PhaseTimeline({
       }
 
       // Block labels
-      ctx.globalAlpha = 0.9;
-      ctx.font = "10px monospace";
+      ctx.globalAlpha = 0.92;
+      ctx.font = FONT_MONO_SM;
       for (const block of blocks) {
         let bestX1 = 0, bestY1 = 0, bestW = 0, bestH = 0;
         for (const strip of block.strips) {
@@ -241,9 +261,9 @@ export default function PhaseTimeline({
         const label = block.top_frame || `0x${block.addr.toString(16)}`;
         const maxChars = Math.floor(bestW / 6.5);
         const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
-        ctx.fillStyle = "#fff";
-        ctx.fillText(text, bestX1 + 3, bestY1 + 11);
-        if (bestH > 26) { ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.fillText(formatBytes(block.size), bestX1 + 3, bestY1 + 23); }
+        ctx.fillStyle = "rgba(250,250,250,0.95)";
+        ctx.fillText(text, bestX1 + 4, bestY1 + 12);
+        if (bestH > 26) { ctx.fillStyle = "rgba(250,250,250,0.55)"; ctx.fillText(formatBytes(block.size), bestX1 + 4, bestY1 + 24); }
       }
       ctx.globalAlpha = 1;
 
@@ -251,7 +271,7 @@ export default function PhaseTimeline({
       for (const block of blocks) {
         if (block.free_requested_us <= 0) continue;
         if (block.size * yScale < 0.5) continue;
-        ctx.fillStyle = "rgba(239,68,68,0.35)";
+        ctx.fillStyle = "rgba(248,113,113,0.38)";
         for (const strip of block.strips) {
           const os = Math.max(strip.t_start, block.free_requested_us);
           if (os >= strip.t_end || strip.t_end <= tMin || os >= tMax) continue;
@@ -262,46 +282,72 @@ export default function PhaseTimeline({
         }
       }
 
-      // Anomaly flags
-      for (const anomaly of anomalies) {
+      // Anomaly flags — capped to top N by severity to keep the plot readable
+      const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
+      for (let ai = 0; ai < flagLimit; ai++) {
+        const anomaly = anomalies[ai];
         if (anomaly.alloc_us > tMax || anomaly.alloc_us < tMin) continue;
         const x = timeToX(anomaly.alloc_us);
         if (x < MARGIN.left || x > MARGIN.left + plotW) continue;
-        const color = ANOMALY_COLORS[anomaly.type] || "#ef4444";
+        const color = ANOMALY_COLORS[anomaly.type] || "#f87171";
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.moveTo(x, MARGIN.top); ctx.lineTo(x - FLAG_SIZE / 2, MARGIN.top - FLAG_SIZE); ctx.lineTo(x + FLAG_SIZE / 2, MARGIN.top - FLAG_SIZE);
         ctx.closePath(); ctx.fill();
-        ctx.strokeStyle = color; ctx.globalAlpha = 0.3; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+        ctx.strokeStyle = color; ctx.globalAlpha = 0.22; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
         ctx.beginPath(); ctx.moveTo(x, MARGIN.top); ctx.lineTo(x, MARGIN.top + plotH); ctx.stroke();
         ctx.setLineDash([]); ctx.globalAlpha = 1;
       }
 
-      // Y axis
-      ctx.fillStyle = "#666"; ctx.font = "11px monospace"; ctx.textAlign = "right";
+      // Y axis — labels + grid lines
+      ctx.fillStyle = COLOR_AXIS; ctx.font = FONT_MONO; ctx.textAlign = "right";
       for (let i = 0; i <= 5; i++) {
         const b = (maxBytes / 5) * i, y = bytesToY(b);
-        ctx.fillText(formatBytes(b), MARGIN.left - 8, y + 4);
-        ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 0.5;
+        ctx.fillText(formatBytes(b), MARGIN.left - 12, y + 4);
+        ctx.strokeStyle = COLOR_GRID; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(MARGIN.left, y); ctx.lineTo(MARGIN.left + plotW, y); ctx.stroke();
       }
-      // X axis
-      ctx.textAlign = "center"; ctx.fillStyle = "#666";
+      // Y axis label
+      ctx.save();
+      ctx.translate(16, MARGIN.top + plotH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = "center";
+      ctx.fillStyle = COLOR_AXIS_DIM;
+      ctx.font = FONT_DISPLAY_SM;
+      ctx.fillText("BYTES", 0, 0);
+      ctx.restore();
+
+      // X axis — ticks + labels
+      ctx.textAlign = "center"; ctx.fillStyle = COLOR_AXIS; ctx.font = FONT_MONO;
       const xTicks = Math.min(8, Math.floor(plotW / 100));
       for (let i = 0; i <= xTicks; i++) {
         const t = tMin + ((tMax - tMin) / xTicks) * i;
-        ctx.fillText(`${((t - data.time_min) / 1e6).toFixed(2)}s`, timeToX(t), height - 8);
+        const tx = timeToX(t);
+        ctx.strokeStyle = COLOR_AXIS_DIM; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(tx, MARGIN.top + plotH); ctx.lineTo(tx, MARGIN.top + plotH + 4); ctx.stroke();
+        ctx.fillText(`${((t - data.time_min) / 1e6).toFixed(2)}s`, tx, height - 14);
       }
+      // X axis label
+      ctx.textAlign = "right";
+      ctx.fillStyle = COLOR_AXIS_DIM;
+      ctx.font = FONT_DISPLAY_SM;
+      ctx.fillText("TIME →", MARGIN.left + plotW, height - 2);
+
       // Peak line
       const peakY = bytesToY(data.peak_bytes);
       if (peakY >= MARGIN.top && peakY <= MARGIN.top + plotH) {
-        ctx.strokeStyle = "rgba(239,68,68,0.4)"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(248,113,113,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
         ctx.beginPath(); ctx.moveTo(MARGIN.left, peakY); ctx.lineTo(MARGIN.left + plotW, peakY); ctx.stroke();
-        ctx.setLineDash([]); ctx.fillStyle = "#ef4444"; ctx.textAlign = "left"; ctx.font = "10px monospace";
-        ctx.fillText(`peak: ${formatBytes(data.peak_bytes)}`, MARGIN.left + 4, peakY - 4);
+        ctx.setLineDash([]); ctx.fillStyle = COLOR_PEAK; ctx.textAlign = "left"; ctx.font = FONT_MONO_SM;
+        ctx.fillText(`PEAK · ${formatBytes(data.peak_bytes)}`, MARGIN.left + 6, peakY - 5);
       }
-      // Border
-      ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.strokeRect(MARGIN.left, MARGIN.top, plotW, plotH);
+      // Border — only bottom + left axis, flat style
+      ctx.strokeStyle = COLOR_AXIS_DIM; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(MARGIN.left, MARGIN.top);
+      ctx.lineTo(MARGIN.left, MARGIN.top + plotH);
+      ctx.lineTo(MARGIN.left + plotW, MARGIN.top + plotH);
+      ctx.stroke();
 
     // --- Overlay effects (hover, rulers, selection) ---
 
@@ -311,9 +357,9 @@ export default function PhaseTimeline({
       if (hb) {
         const rx1 = Math.max(timeToX(hb.alloc_us), MARGIN.left);
         const rx2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
-        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillStyle = "rgba(217,249,157,0.05)";
         ctx.fillRect(rx1, MARGIN.top, rx2 - rx1, plotH);
-        ctx.strokeStyle = "rgba(255,255,255,0.3)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = "rgba(217,249,157,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
         ctx.beginPath();
         if (rx1 >= MARGIN.left) { ctx.moveTo(rx1, MARGIN.top); ctx.lineTo(rx1, MARGIN.top + plotH); }
         if (rx2 <= MARGIN.left + plotW) { ctx.moveTo(rx2, MARGIN.top); ctx.lineTo(rx2, MARGIN.top + plotH); }
@@ -321,8 +367,8 @@ export default function PhaseTimeline({
         if (hb.free_requested_us > 0 && hb.free_requested_us < hb.free_us) {
           const px1 = Math.max(timeToX(hb.free_requested_us), MARGIN.left);
           const px2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
-          ctx.fillStyle = "rgba(239,68,68,0.10)"; ctx.fillRect(px1, MARGIN.top, px2 - px1, plotH);
-          ctx.strokeStyle = "rgba(239,68,68,0.5)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+          ctx.fillStyle = "rgba(248,113,113,0.12)"; ctx.fillRect(px1, MARGIN.top, px2 - px1, plotH);
+          ctx.strokeStyle = "rgba(248,113,113,0.55)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
           ctx.beginPath();
           if (px1 >= MARGIN.left) { ctx.moveTo(px1, MARGIN.top); ctx.lineTo(px1, MARGIN.top + plotH); }
           if (px2 <= MARGIN.left + plotW) { ctx.moveTo(px2, MARGIN.top); ctx.lineTo(px2, MARGIN.top + plotH); }
@@ -337,10 +383,10 @@ export default function PhaseTimeline({
       ctx.save(); ctx.lineWidth = 1.5;
       if (type === "vertical") {
         const x = startPx.x, yTop = Math.min(startPx.y, endPx.y), yBot = Math.max(startPx.y, endPx.y);
-        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,220,50,0.35)";
+        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(217,249,157,0.4)";
         ctx.beginPath(); ctx.moveTo(MARGIN.left, yTop); ctx.lineTo(MARGIN.left + plotW, yTop);
         ctx.moveTo(MARGIN.left, yBot); ctx.lineTo(MARGIN.left + plotW, yBot); ctx.stroke();
-        ctx.setLineDash([]); ctx.strokeStyle = "rgba(255,220,50,0.9)";
+        ctx.setLineDash([]); ctx.strokeStyle = COLOR_ACCENT;
         ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot);
         ctx.moveTo(x - 6, yTop); ctx.lineTo(x + 6, yTop); ctx.moveTo(x - 6, yBot); ctx.lineTo(x + 6, yBot); ctx.stroke();
         const bTop = yToBytes(yTop), bBot = yToBytes(yBot);
@@ -348,10 +394,10 @@ export default function PhaseTimeline({
         drawPill(ctx, `\u0394 ${formatBytes(Math.abs(bTop - bBot))}`, x + 50, (yTop + yBot) / 2);
       } else {
         const y = startPx.y, xL = Math.min(startPx.x, endPx.x), xR = Math.max(startPx.x, endPx.x);
-        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,220,50,0.35)";
+        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(217,249,157,0.4)";
         ctx.beginPath(); ctx.moveTo(xL, MARGIN.top); ctx.lineTo(xL, MARGIN.top + plotH);
         ctx.moveTo(xR, MARGIN.top); ctx.lineTo(xR, MARGIN.top + plotH); ctx.stroke();
-        ctx.setLineDash([]); ctx.strokeStyle = "rgba(255,220,50,0.9)";
+        ctx.setLineDash([]); ctx.strokeStyle = COLOR_ACCENT;
         ctx.beginPath(); ctx.moveTo(xL, y); ctx.lineTo(xR, y);
         ctx.moveTo(xL, y - 6); ctx.lineTo(xL, y + 6); ctx.moveTo(xR, y - 6); ctx.lineTo(xR, y + 6); ctx.stroke();
         const tL = xToTime(xL), tR = xToTime(xR), delta = Math.abs(tR - tL);
@@ -365,12 +411,12 @@ export default function PhaseTimeline({
     if (selRect) {
       const sx1 = Math.min(selRect.x1, selRect.x2), sy1 = Math.min(selRect.y1, selRect.y2);
       const sw = Math.abs(selRect.x2 - selRect.x1), sh = Math.abs(selRect.y2 - selRect.y1);
-      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillStyle = "rgba(10,10,11,0.55)";
       ctx.fillRect(MARGIN.left, MARGIN.top, plotW, sy1 - MARGIN.top);
       ctx.fillRect(MARGIN.left, sy1 + sh, plotW, MARGIN.top + plotH - sy1 - sh);
       ctx.fillRect(MARGIN.left, sy1, sx1 - MARGIN.left, sh);
       ctx.fillRect(sx1 + sw, sy1, MARGIN.left + plotW - sx1 - sw, sh);
-      ctx.strokeStyle = "rgba(59,130,246,0.8)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = COLOR_ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
       ctx.strokeRect(sx1, sy1, sw, sh); ctx.setLineDash([]);
     }
   }, [data, blocks, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
@@ -422,9 +468,11 @@ export default function PhaseTimeline({
         return;
       }
 
-      // Check flag hit (top margin area)
+      // Check flag hit (top margin area) — only visible flags
       if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
-        for (const anomaly of anomalies) {
+        const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
+        for (let ai = 0; ai < flagLimit; ai++) {
+          const anomaly = anomalies[ai];
           const fx = timeToX(anomaly.alloc_us);
           if (Math.abs(mx - fx) < FLAG_SIZE) {
             setHoverAnomaly({ anomaly, x: mx, y: my });
@@ -588,7 +636,9 @@ export default function PhaseTimeline({
         } else {
           // Click — flag or block selection
           if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
-            for (const anomaly of anomalies) {
+            const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
+            for (let ai = 0; ai < flagLimit; ai++) {
+              const anomaly = anomalies[ai];
               const fx = timeToX(anomaly.alloc_us);
               if (Math.abs(mx - fx) < FLAG_SIZE) {
                 const block = blocks.find((b) => b.addr === anomaly.addr) ?? null;
@@ -653,96 +703,96 @@ export default function PhaseTimeline({
         {/* anomaly flag tooltip */}
         {hoverAnomaly && (
           <div
+            className="tl-tooltip"
             style={{
-              position: "absolute",
-              left: Math.min(hoverAnomaly.x + 12, width - 300),
+              left: Math.min(hoverAnomaly.x + 12, width - 320),
               top: Math.max(hoverAnomaly.y + 8, 4),
-              background: "rgba(30,0,0,0.95)",
-              border: `1px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`,
-              borderRadius: 4,
-              padding: "6px 10px",
-              fontSize: 12,
-              color: "#ddd",
-              pointerEvents: "none",
-              maxWidth: 360,
-              fontFamily: "monospace",
-              lineHeight: 1.5,
+              borderLeft: `2px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`,
             }}
           >
-            <div style={{ color: ANOMALY_COLORS[hoverAnomaly.anomaly.type], fontWeight: 600 }}>
+            <div
+              className="display"
+              style={{
+                color: ANOMALY_COLORS[hoverAnomaly.anomaly.type],
+                fontSize: 10,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                marginBottom: 4,
+              }}
+            >
               {hoverAnomaly.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect"}
             </div>
-            <div>{formatBytes(hoverAnomaly.anomaly.size)} {hoverAnomaly.anomaly.label}</div>
-            <div style={{ color: "#888" }}>{hoverAnomaly.anomaly.top_frame}</div>
+            <div className="mono" style={{ color: "var(--fg)", marginBottom: 2 }}>
+              {formatBytes(hoverAnomaly.anomaly.size)} · {hoverAnomaly.anomaly.label}
+            </div>
+            <div className="mono faint" style={{ fontSize: 10 }}>
+              {hoverAnomaly.anomaly.top_frame}
+            </div>
           </div>
         )}
         {/* hover tooltip */}
         {hoverBlock && hoverPos && !hoverAnomaly && (
           <div
+            className="tl-tooltip"
             style={{
-              position: "absolute",
-              left: Math.min(hoverPos.x + 12, width - 300),
+              left: Math.min(hoverPos.x + 12, width - 320),
               top: Math.max(hoverPos.y - 70, 4),
-              background: "rgba(0,0,0,0.92)",
-              border: "1px solid #444",
-              borderRadius: 4,
-              padding: "6px 10px",
-              fontSize: 12,
-              color: "#ddd",
-              pointerEvents: "none",
-              maxWidth: 340,
-              fontFamily: "monospace",
-              lineHeight: 1.5,
             }}
           >
-            <div style={{ color: "#fff", fontWeight: 600 }}>{formatBytes(hoverBlock.size)}</div>
-            <div>{hoverBlock.top_frame || `0x${hoverBlock.addr.toString(16)}`}</div>
-            <div style={{ color: "#888" }}>
+            <div className="mono" style={{ color: "var(--fg)", fontSize: 13, marginBottom: 2 }}>
+              {formatBytes(hoverBlock.size)}
+            </div>
+            <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
+              {hoverBlock.top_frame || `0x${hoverBlock.addr.toString(16)}`}
+            </div>
+            <div className="mono faint" style={{ fontSize: 10 }}>
               {((hoverBlock.free_us - hoverBlock.alloc_us) / 1e6).toFixed(4)}s
-              {hoverBlock.alive && " (alive)"}
+              {hoverBlock.alive && " · alive"}
             </div>
           </div>
         )}
-        <div style={{ position: "absolute", bottom: 44, right: 24, fontSize: 11, color: "#444" }}>
-          WASD=navigate W/S=zoom R=reset R+drag=mem T+drag=time Esc=clear Ctrl+C=copy
+        <div className="tl-hint mono">
+          <span>WASD</span> navigate · <span>W/S</span> zoom · <span>R+drag</span> mem ruler · <span>T+drag</span> time ruler · <span>Esc</span> clear · <span>⌘C</span> copy
         </div>
       </div>
 
       {/* detail panel */}
       {detail && (
-        <div
-          style={{
-            marginTop: 8,
-            background: "#111",
-            border: "1px solid #333",
-            borderRadius: 6,
-            padding: 16,
-            maxHeight: 300,
-            overflow: "auto",
-          }}
-        >
-          <div style={{ display: "flex", gap: 24, marginBottom: 12 }}>
-            <div>
-              <span style={{ color: "#888" }}>Size: </span>
-              <span style={{ color: "#fff" }}>{formatBytes(detail.size)}</span>
+        <div className="tl-detail">
+          <div className="tl-detail-head">
+            <div className="stat">
+              <span className="stat-label">Size</span>
+              <span className="stat-value" style={{ fontSize: 18 }}>{formatBytes(detail.size)}</span>
             </div>
-            <div>
-              <span style={{ color: "#888" }}>Duration: </span>
-              <span style={{ color: "#fff" }}>
+            <div className="stat">
+              <span className="stat-label">Duration</span>
+              <span className="stat-value" style={{ fontSize: 18 }}>
                 {detail.free_us === -1
                   ? "alive"
                   : `${((detail.free_us - detail.alloc_us) / 1e6).toFixed(4)}s`}
               </span>
             </div>
-            <div>
-              <span style={{ color: "#888" }}>Address: </span>
-              <span style={{ color: "#fff", fontFamily: "monospace" }}>
+            <div className="stat">
+              <span className="stat-label">Address</span>
+              <span className="stat-value mono" style={{ fontSize: 14 }}>
                 0x{detail.addr.toString(16)}
               </span>
             </div>
-            <div style={{ color: "#666", fontSize: 11 }}>Ctrl+C to copy trace</div>
+            <div
+              className="mono"
+              style={{
+                marginLeft: "auto",
+                alignSelf: "flex-end",
+                fontSize: 10,
+                color: "var(--fg-faint)",
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+              }}
+            >
+              ⌘C copy trace
+            </div>
           </div>
-          <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 1.6 }}>
+          <div className="tl-detail-trace mono">
             {detail.frames
               .filter(
                 (f) =>
@@ -753,11 +803,13 @@ export default function PhaseTimeline({
               .map((f, i) => {
                 const isPython = f.filename.includes(".py");
                 return (
-                  <div key={i} style={{ color: isPython ? "#93c5fd" : "#555" }}>
-                    {f.name.length > 100 ? f.name.slice(0, 97) + "..." : f.name}
+                  <div key={i} className="tl-frame" data-py={isPython ? "1" : "0"}>
+                    <span className="tl-frame-name">
+                      {f.name.length > 100 ? f.name.slice(0, 97) + "…" : f.name}
+                    </span>
                     {f.filename && (
-                      <span style={{ color: isPython ? "#60a5fa" : "#444" }}>
-                        {" "}@ {f.filename.split("/").slice(-2).join("/")}:{f.line}
+                      <span className="tl-frame-loc">
+                        {" @ "}{f.filename.split("/").slice(-2).join("/")}:{f.line}
                       </span>
                     )}
                   </div>
@@ -766,6 +818,61 @@ export default function PhaseTimeline({
           </div>
         </div>
       )}
+
+      <style>{`
+        .tl-tooltip {
+          position: absolute;
+          background: rgba(10,10,11,0.96);
+          border: 1px solid var(--border-strong);
+          padding: 10px 14px;
+          font-size: 12px;
+          pointer-events: none;
+          max-width: 360px;
+          line-height: 1.5;
+          backdrop-filter: blur(12px);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .tl-hint {
+          position: absolute;
+          bottom: 52px;
+          right: 28px;
+          font-size: 10px;
+          color: var(--fg-dim);
+          letter-spacing: 0.04em;
+        }
+        .tl-hint span {
+          color: var(--fg-faint);
+          font-weight: 500;
+        }
+        .tl-detail {
+          margin-top: 16px;
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
+          border-left: 2px solid var(--accent);
+          padding: 20px 24px;
+          max-height: 320px;
+          overflow: auto;
+        }
+        .tl-detail-head {
+          display: flex;
+          gap: var(--s7);
+          margin-bottom: 16px;
+          padding-bottom: 14px;
+          border-bottom: 1px solid var(--divider);
+        }
+        .tl-detail-trace {
+          font-size: 11px;
+          line-height: 1.7;
+        }
+        .tl-frame {
+          color: var(--fg-dim);
+          padding: 1px 0;
+        }
+        .tl-frame[data-py="1"] { color: var(--fg-muted); }
+        .tl-frame[data-py="1"] .tl-frame-loc { color: var(--accent); opacity: 0.8; }
+        .tl-frame-name { color: inherit; }
+        .tl-frame-loc { color: var(--fg-dim); }
+      `}</style>
     </div>
   );
 }

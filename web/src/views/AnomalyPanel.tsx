@@ -1,78 +1,217 @@
-import { Table, Tag } from "antd";
+import { Fragment, useState } from "react";
 import type { Anomaly } from "../compute";
 import { useDataStore } from "../stores/dataStore";
 import { formatBytes } from "../utils";
-
-const TYPE_COLORS: Record<string, string> = {
-  pending_free: "volcano",
-  leak: "red",
-};
 
 const TYPE_LABELS: Record<string, string> = {
   pending_free: "Pending Free",
   leak: "Leak Suspect",
 };
 
-const columns = [
-  {
-    title: "Type",
-    dataIndex: "type",
-    width: 130,
-    render: (t: string) => <Tag color={TYPE_COLORS[t]}>{TYPE_LABELS[t]}</Tag>,
-    filters: [
-      { text: "Pending Free", value: "pending_free" },
-      { text: "Leak Suspect", value: "leak" },
-    ],
-    onFilter: (v: any, r: Anomaly) => r.type === v,
-  },
-  {
-    title: "Size",
-    dataIndex: "size",
-    width: 100,
-    render: (s: number) => formatBytes(s),
-    sorter: (a: Anomaly, b: Anomaly) => a.size - b.size,
-  },
-  {
-    title: "Info",
-    dataIndex: "label",
-    width: 140,
-  },
-  {
-    title: "Source",
-    dataIndex: "top_frame",
-    ellipsis: true,
-    render: (f: string) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{f || "?"}</span>,
-  },
-];
+const TYPE_CHIP: Record<string, string> = {
+  pending_free: "chip chip-orange",
+  leak: "chip chip-red",
+};
+
+const PAGE_SIZE = 20;
 
 export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
   const focusAnomaly = useDataStore((s) => s.focusAnomaly);
   const focusedAddr = useDataStore((s) => s.focusedAddr);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [filter, setFilter] = useState<"all" | "pending_free" | "leak">("all");
 
   if (anomalies.length === 0) return null;
 
+  const filtered = filter === "all" ? anomalies : anomalies.filter((a) => a.type === filter);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageData = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+
+  const leakCount = anomalies.filter((a) => a.type === "leak").length;
+  const pendingCount = anomalies.length - leakCount;
+
   return (
-    <Table
-      dataSource={anomalies}
-      columns={columns}
-      rowKey={(r) => `${r.addr}-${r.alloc_us}`}
-      size="small"
-      pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
-      scroll={{ y: 300 }}
-      onRow={(record) => ({
-        onClick: () => focusAnomaly(record),
-        style: {
-          cursor: "pointer",
-          background: focusedAddr === record.addr ? "rgba(59,130,246,0.15)" : undefined,
-        },
-      })}
-      expandable={{
-        expandedRowRender: (r) => (
-          <div style={{ fontFamily: "monospace", fontSize: 12, color: "#999", whiteSpace: "pre-wrap" }}>
-            {r.detail}
-          </div>
-        ),
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "0 0 10px",
+        }}
+      >
+        <FilterPill
+          active={filter === "all"}
+          onClick={() => { setFilter("all"); setPage(0); }}
+          label="All"
+          count={anomalies.length}
+        />
+        <FilterPill
+          active={filter === "leak"}
+          onClick={() => { setFilter("leak"); setPage(0); }}
+          label="Leak"
+          count={leakCount}
+          tone="red"
+        />
+        <FilterPill
+          active={filter === "pending_free"}
+          onClick={() => { setFilter("pending_free"); setPage(0); }}
+          label="Pending"
+          count={pendingCount}
+          tone="orange"
+        />
+        <div style={{ flex: 1 }} />
+        <span className="mono faint" style={{ fontSize: 11 }}>
+          {safePage * PAGE_SIZE + 1}–{Math.min((safePage + 1) * PAGE_SIZE, filtered.length)} / {filtered.length}
+        </span>
+        <button
+          className="btn"
+          style={{ padding: "4px 12px", fontSize: 11 }}
+          disabled={safePage === 0}
+          onClick={() => setPage((p) => Math.max(0, p - 1))}
+        >
+          ←
+        </button>
+        <button
+          className="btn"
+          style={{ padding: "4px 12px", fontSize: 11 }}
+          disabled={safePage >= totalPages - 1}
+          onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+        >
+          →
+        </button>
+      </div>
+      <div style={{ borderTop: "1px solid var(--border)" }}>
+        <table className="dtable">
+          <thead>
+            <tr>
+              <th style={{ width: 140 }}>Type</th>
+              <th style={{ width: 110 }}>Size</th>
+              <th style={{ width: 160 }}>Info</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageData.map((a) => {
+              const key = `${a.addr}-${a.alloc_us}`;
+              const isSelected = focusedAddr === a.addr;
+              const isExpanded = expanded === key;
+              return (
+                <Fragment key={key}>
+                  <tr
+                    className={isSelected ? "is-selected" : ""}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => {
+                      focusAnomaly(a);
+                      setExpanded(isExpanded ? null : key);
+                    }}
+                  >
+                    <td>
+                      <span className={TYPE_CHIP[a.type] || "chip"}>
+                        {TYPE_LABELS[a.type] || a.type}
+                      </span>
+                    </td>
+                    <td className="mono" style={{ color: "var(--fg)" }}>
+                      {formatBytes(a.size)}
+                    </td>
+                    <td className="mono faint" style={{ fontSize: 11 }}>
+                      {a.label}
+                    </td>
+                    <td
+                      className="mono"
+                      style={{
+                        fontSize: 11,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        maxWidth: 0,
+                      }}
+                    >
+                      {a.top_frame || "?"}
+                    </td>
+                  </tr>
+                  {isExpanded && a.detail && (
+                    <tr>
+                      <td
+                        colSpan={4}
+                        style={{
+                          background: "var(--bg)",
+                          padding: "12px 16px",
+                          borderBottom: "1px solid var(--border)",
+                        }}
+                      >
+                        <pre
+                          className="mono"
+                          style={{
+                            fontSize: 11,
+                            color: "var(--fg-muted)",
+                            margin: 0,
+                            whiteSpace: "pre-wrap",
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {a.detail}
+                        </pre>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  label,
+  count,
+  tone,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count: number;
+  tone?: "red" | "orange";
+}) {
+  const color =
+    tone === "red" ? "var(--red)" : tone === "orange" ? "var(--orange)" : "var(--fg)";
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 12px",
+        background: active ? "var(--bg-elev)" : "transparent",
+        border: `1px solid ${active ? "var(--border-strong)" : "var(--border)"}`,
+        color: active ? color : "var(--fg-muted)",
+        fontFamily: "var(--font-display)",
+        fontSize: 11,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+        cursor: "pointer",
+        transition: "all 120ms var(--ease)",
       }}
-    />
+    >
+      {label}
+      <span
+        className="mono"
+        style={{
+          fontSize: 10,
+          color: active ? color : "var(--fg-faint)",
+          letterSpacing: 0,
+        }}
+      >
+        {count}
+      </span>
+    </button>
   );
 }

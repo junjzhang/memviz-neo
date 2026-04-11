@@ -4,6 +4,7 @@ import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../ty
 import type { Anomaly } from "../compute/anomalies";
 import { detectAnomalies } from "../compute/anomalies";
 import { createWorkerPool, type WorkerResult, type WorkerTask } from "../compute/workerPool";
+import { STRIP_PALETTE_RGB } from "../views/glRenderer";
 
 type FileReader = () => Promise<ArrayBuffer>;
 
@@ -73,6 +74,39 @@ function parseWorkerResult(json: string, _rank: number): RankData {
   const treemap: TreemapNode = { name: "GPU Memory", size: rootChildren.reduce((s: number, c: TreemapNode) => s + c.size, 0), children: rootChildren };
   topAllocations.sort((a: TopAllocation, b: TopAllocation) => b.size - a.size);
 
+  // Pre-pack strip buffer for WebGL — do the O(N) iteration once at load,
+  // not on every rank switch. Also compute maxBytesFull for fast-path.
+  //
+  // IMPORTANT: subtract time_min before storing as Float32. Real PyTorch traces
+  // use absolute Unix timestamps (~1.77e15 us), which collapse to 0-width quads
+  // when stored as Float32 (mantissa can't distinguish microsecond-scale diffs).
+  const blocks = raw.blocks as { strips: { t_start: number; t_end: number; y_offset: number }[]; size: number; idx: number }[];
+  const timeOrigin: number = raw.timeline.time_min;
+  let stripCount = 0;
+  let maxBytesFull = 0;
+  for (const b of blocks) {
+    stripCount += b.strips.length;
+    for (const s of b.strips) {
+      const t = s.y_offset + b.size;
+      if (t > maxBytesFull) maxBytesFull = t;
+    }
+  }
+  const stripBuffer = new Float32Array(stripCount * 7);
+  let off = 0;
+  for (const block of blocks) {
+    const [r, g, bl] = STRIP_PALETTE_RGB[block.idx % STRIP_PALETTE_RGB.length];
+    const sz = block.size;
+    for (const strip of block.strips) {
+      stripBuffer[off++] = strip.t_start - timeOrigin;
+      stripBuffer[off++] = strip.t_end - timeOrigin;
+      stripBuffer[off++] = strip.y_offset;
+      stripBuffer[off++] = sz;
+      stripBuffer[off++] = r;
+      stripBuffer[off++] = g;
+      stripBuffer[off++] = bl;
+    }
+  }
+
   return {
     summary,
     treemap,
@@ -89,6 +123,9 @@ function parseWorkerResult(json: string, _rank: number): RankData {
     timelineBlocks: raw.blocks,
     allocations,
     anomalies,
+    stripBuffer,
+    stripCount,
+    maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
   };
 }
 

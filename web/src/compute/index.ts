@@ -21,6 +21,12 @@ export interface RankData {
   timelineBlocks: TimelineBlock[];
   allocations: Allocation[];
   anomalies: Anomaly[];
+  // Pre-packed GPU buffer for WebGL instanced rendering.
+  // 7 floats per strip: (t_start, t_end, y_offset, height, r, g, b)
+  stripBuffer: Float32Array;
+  stripCount: number;
+  // Per-rank max bytes (for full-view fast path, avoids iterating blocks)
+  maxBytesFull: number;
 }
 
 export function getAllocationDetail(allocations: Allocation[], addr: number): AllocationDetail | null {

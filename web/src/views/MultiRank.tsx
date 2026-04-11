@@ -1,4 +1,3 @@
-import { Card } from "antd";
 import type { RankSummary } from "../types/snapshot";
 import { formatBytes } from "../utils";
 
@@ -14,65 +13,88 @@ export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
   const maxReserved = Math.max(...data.map((d) => d.total_reserved));
 
   return (
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
       {data.map((rank) => {
         const pct = (rank.total_allocated / rank.total_reserved) * 100;
         const isSelected = rank.rank === currentRank;
+        const activePct = (rank.active_bytes / maxReserved) * 100;
+        const inactivePct = (rank.inactive_bytes / maxReserved) * 100;
 
         return (
-          <Card
+          <div
             key={rank.rank}
-            size="small"
+            className={"rank-card" + (isSelected ? " is-selected" : "")}
             onClick={() => onSelectRank(rank.rank)}
-            style={{
-              width: 160,
-              cursor: "pointer",
-              borderColor: isSelected ? "#1677ff" : "#303030",
-              background: isSelected ? "#111a2e" : "#141414",
-            }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              Rank {rank.rank}
-            </div>
-            <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>
-              {formatBytes(rank.total_allocated)} /{" "}
-              {formatBytes(rank.total_reserved)}
+            <div
+              className="display"
+              style={{
+                fontSize: 11,
+                letterSpacing: "0.12em",
+                color: "var(--fg-faint)",
+                textTransform: "uppercase",
+                marginBottom: 6,
+              }}
+            >
+              Rank {String(rank.rank).padStart(2, "0")}
             </div>
             <div
+              className="mono"
               style={{
-                height: 12,
-                background: "#222",
-                borderRadius: 2,
-                overflow: "hidden",
+                fontSize: 16,
+                color: "var(--fg)",
+                fontVariantNumeric: "tabular-nums",
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {formatBytes(rank.total_allocated)}
+            </div>
+            <div
+              className="mono faint"
+              style={{ fontSize: 11, marginBottom: 10 }}
+            >
+              / {formatBytes(rank.total_reserved)}
+            </div>
+
+            <div
+              style={{
+                height: 4,
+                background: "var(--bg)",
                 display: "flex",
+                overflow: "hidden",
               }}
             >
               <div
                 style={{
-                  width: `${(rank.active_bytes / maxReserved) * 100}%`,
-                  background: "#3b82f6",
+                  width: `${activePct}%`,
+                  background: isSelected ? "var(--accent)" : "var(--fg-muted)",
                   height: "100%",
+                  transition: "width 200ms var(--ease)",
                 }}
               />
               <div
                 style={{
-                  width: `${(rank.inactive_bytes / maxReserved) * 100}%`,
-                  background: "#444",
+                  width: `${inactivePct}%`,
+                  background: "var(--border-strong)",
                   height: "100%",
                 }}
               />
             </div>
+
             <div
+              className="mono"
               style={{
                 fontSize: 10,
-                color: "#666",
-                marginTop: 4,
-                textAlign: "right",
+                color: "var(--fg-faint)",
+                marginTop: 6,
+                display: "flex",
+                justifyContent: "space-between",
               }}
             >
-              {pct.toFixed(1)}% used
+              <span>{pct.toFixed(1)}%</span>
+              <span>util</span>
             </div>
-          </Card>
+          </div>
         );
       })}
     </div>

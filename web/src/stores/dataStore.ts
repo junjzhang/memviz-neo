@@ -23,6 +23,10 @@ interface DataState {
   timeline: TimelineData | null;
   timelineBlocks: TimelineBlock[];
   anomalies: Anomaly[];
+  // Pre-packed WebGL strip data — zero-copy on rank switch
+  timelineStripBuffer: Float32Array | null;
+  timelineStripCount: number;
+  timelineMaxBytesFull: number;
   loading: boolean;
   error: string | null;
   focusedAddr: number | null;
@@ -49,6 +53,9 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     timeline: data.timeline,
     timelineBlocks: data.timelineBlocks,
     anomalies: data.anomalies,
+    timelineStripBuffer: data.stripBuffer,
+    timelineStripCount: data.stripCount,
+    timelineMaxBytesFull: data.maxBytesFull,
     focusedAddr: null,
     focusRange: null,
     loading: false,
@@ -66,6 +73,9 @@ export const useDataStore = create<DataState>((set, get) => ({
   timeline: null,
   timelineBlocks: [],
   anomalies: [],
+  timelineStripBuffer: null,
+  timelineStripCount: 0,
+  timelineMaxBytesFull: 0,
   loading: false,
   error: null,
   focusedAddr: null,
@@ -144,6 +154,9 @@ export const useDataStore = create<DataState>((set, get) => ({
     timeline: null,
     timelineBlocks: [],
     anomalies: [],
+    timelineStripBuffer: null,
+    timelineStripCount: 0,
+    timelineMaxBytesFull: 0,
     focusedAddr: null,
     focusRange: null,
     _rankCache: new Map(),

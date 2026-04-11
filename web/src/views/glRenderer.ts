@@ -106,40 +106,36 @@ export function initGL(canvas: HTMLCanvasElement): GLState | null {
   };
 }
 
-const PALETTE_RGB: [number, number, number][] = [
-  [0.231,0.510,0.965], [0.937,0.267,0.267], [0.133,0.773,0.369], [0.961,0.620,0.043], [0.545,0.361,0.965],
-  [0.024,0.714,0.831], [0.925,0.302,0.600], [0.078,0.722,0.651], [0.976,0.451,0.086], [0.388,0.400,0.945],
-  [0.518,0.800,0.086], [0.910,0.475,0.976], [0.055,0.647,0.890], [0.984,0.573,0.235], [0.655,0.545,0.980],
+// Muted palette — 12 evenly-spaced hues at low saturation (~35%)
+// Balanced cool/warm, avoids yellow-brown dominance
+export const STRIP_PALETTE_RGB: readonly (readonly [number, number, number])[] = [
+  [0.42, 0.56, 0.73],  // steel blue    #6b8fba
+  [0.49, 0.49, 0.73],  // indigo        #7d7cba
+  [0.58, 0.49, 0.73],  // violet        #947cba
+  [0.69, 0.49, 0.71],  // orchid        #b07cb5
+  [0.69, 0.49, 0.58],  // mauve rose    #b07c93
+  [0.69, 0.54, 0.49],  // terracotta    #b08a7c
+  [0.69, 0.62, 0.49],  // sand          #b09f7c
+  [0.54, 0.69, 0.49],  // sage          #8ab07c
+  [0.49, 0.69, 0.54],  // mint          #7cb08a
+  [0.49, 0.69, 0.64],  // seafoam       #7cb0a3
+  [0.49, 0.62, 0.69],  // sky           #7c9eb0
+  [0.49, 0.53, 0.69],  // periwinkle    #7c87b0
 ];
 
+/**
+ * Upload a pre-packed strip buffer to the GPU.
+ * Zero JS iteration — buffer is built once at load time in fileStore.
+ */
 export function uploadStrips(
   state: GLState,
-  blocks: { strips: { t_start: number; t_end: number; y_offset: number }[]; size: number; idx: number }[],
+  stripBuffer: Float32Array,
+  stripCount: number,
 ) {
   const { gl, instanceVBO } = state;
-
-  // Count total strips
-  let total = 0;
-  for (const b of blocks) total += b.strips.length;
-
-  const buf = new Float32Array(total * 7);
-  let off = 0;
-  for (const block of blocks) {
-    const [r, g, b] = PALETTE_RGB[block.idx % PALETTE_RGB.length];
-    for (const strip of block.strips) {
-      buf[off++] = strip.t_start;
-      buf[off++] = strip.t_end;
-      buf[off++] = strip.y_offset;
-      buf[off++] = block.size;
-      buf[off++] = r;
-      buf[off++] = g;
-      buf[off++] = b;
-    }
-  }
-
   gl.bindBuffer(gl.ARRAY_BUFFER, instanceVBO);
-  gl.bufferData(gl.ARRAY_BUFFER, buf, gl.STATIC_DRAW);
-  state.instanceCount = total;
+  gl.bufferData(gl.ARRAY_BUFFER, stripBuffer, gl.STATIC_DRAW);
+  state.instanceCount = stripCount;
 }
 
 export function drawStrips(
@@ -153,6 +149,7 @@ export function drawStrips(
   tMin: number,
   tMax: number,
   maxBytes: number,
+  timeOrigin: number,
 ) {
   const { gl, program, uXTf, uYTf, instanceCount } = state;
   if (instanceCount === 0) return;
@@ -176,15 +173,16 @@ export function drawStrips(
 
   gl.useProgram(program);
 
-  // Compute affine transform: world → clip space
-  // clip_x = (time - tMin) / (tMax - tMin) * (2 * plotW / canvasW) + (2 * plotLeft / canvasW - 1)
-  const xScale = (2 * plotW) / (canvasW * (tMax - tMin));
-  const xOffset = (2 * plotLeft) / canvasW - 1 - tMin * xScale;
+  // Strip time values are pre-normalized (t - timeOrigin). We must normalize
+  // tMin/tMax the same way, otherwise subtraction below happens in Float32
+  // with absolute Unix timestamps and collapses the entire range.
+  const tMinN = tMin - timeOrigin;
+  const tMaxN = tMax - timeOrigin;
 
-  // clip_y: bytes=0 at bottom of plot, bytes=maxBytes at top
-  // pixel_y = plotTop + plotH - bytes/maxBytes * plotH = plotTop + plotH * (1 - bytes/maxBytes)
-  // clip_y = 1 - 2 * pixel_y / canvasH
-  //        = 1 - 2*(plotTop + plotH)/canvasH + 2*plotH*bytes/(maxBytes*canvasH)
+  // clip_x = (tN - tMinN) / (tMaxN - tMinN) * (2 * plotW / canvasW) + (2 * plotLeft / canvasW - 1)
+  const xScale = (2 * plotW) / (canvasW * (tMaxN - tMinN));
+  const xOffset = (2 * plotLeft) / canvasW - 1 - tMinN * xScale;
+
   const yScale = (2 * plotH) / (canvasH * maxBytes);
   const yOffset = 1 - (2 * (plotTop + plotH)) / canvasH;
 

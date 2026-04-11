@@ -1,5 +1,4 @@
-import { Table } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import { useMemo, useState } from "react";
 import type { TopAllocation } from "../types/snapshot";
 import { formatBytes } from "../utils";
 
@@ -7,57 +6,130 @@ interface Props {
   data: TopAllocation[];
 }
 
-const columns: ColumnsType<TopAllocation> = [
-  {
-    title: "#",
-    key: "index",
-    width: 50,
-    render: (_v, _r, i) => i + 1,
-  },
-  {
-    title: "Size",
-    dataIndex: "size",
-    width: 110,
-    sorter: (a, b) => a.size - b.size,
-    defaultSortOrder: "descend",
-    render: (v: number) => formatBytes(v),
-  },
-  {
-    title: "Type",
-    dataIndex: "segment_type",
-    width: 80,
-  },
-  {
-    title: "Source",
-    dataIndex: "source",
-    ellipsis: true,
-    render: (v: string | null) => (
-      <span style={{ fontFamily: "monospace", fontSize: 12 }}>
-        {v ?? "\u2014"}
-      </span>
-    ),
-  },
-  {
-    title: "Address",
-    dataIndex: "address",
-    width: 140,
-    render: (v: number) => (
-      <span style={{ fontFamily: "monospace", fontSize: 12 }}>
-        0x{v.toString(16)}
-      </span>
-    ),
-  },
-];
+type SortKey = "size" | "segment_type";
+type SortDir = "asc" | "desc";
+
+const PAGE_SIZE = 20;
 
 export default function TopAllocations({ data }: Props) {
+  const [sortKey, setSortKey] = useState<SortKey>("size");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [page, setPage] = useState(0);
+
+  const sorted = useMemo(() => {
+    const copy = [...data];
+    copy.sort((a, b) => {
+      const av = a[sortKey] as number | string;
+      const bv = b[sortKey] as number | string;
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return copy;
+  }, [data, sortKey, sortDir]);
+
+  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
+  const pageData = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  const toggleSort = (k: SortKey) => {
+    if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(k);
+      setSortDir("desc");
+    }
+  };
+
+  const sortArrow = (k: SortKey) =>
+    k === sortKey ? (
+      <span className="hl" style={{ marginLeft: 4 }}>
+        {sortDir === "asc" ? "↑" : "↓"}
+      </span>
+    ) : null;
+
   return (
-    <Table
-      columns={columns}
-      dataSource={data}
-      rowKey="address"
-      size="small"
-      pagination={{ pageSize: 20, showSizeChanger: true }}
-      scroll={{ y: 500 }}
-    />
+    <div>
+      <div className="dtable-scroll">
+        <table className="dtable">
+          <thead>
+            <tr>
+              <th style={{ width: 50 }}>#</th>
+              <th
+                style={{ width: 120, cursor: "pointer", userSelect: "none" }}
+                onClick={() => toggleSort("size")}
+              >
+                Size {sortArrow("size")}
+              </th>
+              <th
+                style={{ width: 110, cursor: "pointer", userSelect: "none" }}
+                onClick={() => toggleSort("segment_type")}
+              >
+                Type {sortArrow("segment_type")}
+              </th>
+              <th>Source</th>
+              <th style={{ width: 160 }}>Address</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageData.map((row, i) => (
+              <tr key={row.address}>
+                <td className="mono faint">{page * PAGE_SIZE + i + 1}</td>
+                <td className="mono" style={{ color: "var(--fg)" }}>
+                  {formatBytes(row.size)}
+                </td>
+                <td className="mono" style={{ fontSize: 11 }}>
+                  <span className="chip">{row.segment_type}</span>
+                </td>
+                <td
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 0,
+                  }}
+                >
+                  {row.source ?? "—"}
+                </td>
+                <td className="mono" style={{ fontSize: 11 }}>
+                  0x{row.address.toString(16)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {totalPages > 1 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
+            gap: 12,
+            paddingTop: 12,
+          }}
+        >
+          <span className="mono faint" style={{ fontSize: 11 }}>
+            {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, sorted.length)} / {sorted.length}
+          </span>
+          <button
+            className="btn"
+            style={{ padding: "4px 12px", fontSize: 11 }}
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            ←
+          </button>
+          <button
+            className="btn"
+            style={{ padding: "4px 12px", fontSize: 11 }}
+            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+          >
+            →
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
