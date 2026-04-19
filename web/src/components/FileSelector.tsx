@@ -1,5 +1,5 @@
-import { useRef } from "react";
-import { useFileStore } from "../stores/fileStore";
+import { useMemo, useRef } from "react";
+import { useFileStore, WORKER_COUNT_MAX } from "../stores/fileStore";
 
 const hasDirectoryPicker = typeof window !== "undefined" && "showDirectoryPicker" in window;
 
@@ -12,9 +12,15 @@ const PHASE_LABEL: Record<string, string> = {
 };
 
 export default function FileSelector() {
-  const { status, phase, inFlightRanks, poolSize, error, openDirectory, openFiles } =
+  const { status, phase, inFlightRanks, poolSize, error, openDirectory, openFiles, workerCount, setWorkerCount } =
     useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Pill values: 1, 2, 4, 8, detected max — deduped and capped.
+  const workerOptions = useMemo(() => {
+    const set = new Set<number>([1, 2, 4, 8, WORKER_COUNT_MAX]);
+    return [...set].filter((n) => n <= WORKER_COUNT_MAX).sort((a, b) => a - b);
+  }, []);
 
   if (status === "loading") {
     return <LoadingView phase={phase} inFlightRanks={inFlightRanks} poolSize={poolSize} />;
@@ -33,6 +39,25 @@ export default function FileSelector() {
           Everything is parsed, computed and rendered locally in your browser —
           <span className="muted"> zero backend, zero upload.</span>
         </p>
+
+        <div className="fs-config">
+          <span className="fs-config-k">Workers</span>
+          <div className="fs-pills">
+            {workerOptions.map((n) => (
+              <button
+                key={n}
+                className={"fs-pill mono" + (workerCount === n ? " is-active" : "")}
+                onClick={() => setWorkerCount(n)}
+                aria-pressed={workerCount === n}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <span className="fs-config-hint mono faint">
+            detected {WORKER_COUNT_MAX} core{WORKER_COUNT_MAX === 1 ? "" : "s"}
+          </span>
+        </div>
 
         <div className="fs-actions">
           {hasDirectoryPicker && (
@@ -210,6 +235,49 @@ function FsStyle() {
         max-width: 560px;
         margin: 0 0 var(--s7);
       }
+      .fs-config {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: var(--s5);
+        flex-wrap: wrap;
+      }
+      .fs-config-k {
+        font-family: var(--font-display);
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--fg-faint);
+      }
+      .fs-config-hint {
+        font-size: 10px;
+        letter-spacing: 0.06em;
+      }
+      .fs-pills {
+        display: inline-flex;
+        gap: 4px;
+      }
+      .fs-pill {
+        min-width: 32px;
+        padding: 5px 10px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--fg-muted);
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        cursor: pointer;
+        transition: all 120ms var(--ease);
+      }
+      .fs-pill:hover {
+        border-color: var(--fg-faint);
+        color: var(--fg);
+      }
+      .fs-pill.is-active {
+        color: var(--bg);
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+
       .fs-actions {
         display: flex;
         gap: var(--s3);

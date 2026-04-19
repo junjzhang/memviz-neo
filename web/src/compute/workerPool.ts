@@ -48,8 +48,10 @@ export function createWorkerPool(
   onResult: (result: WorkerResult) => void,
   onError: (rank: number, error: string) => void,
   onProgress: (snap: ProgressSnapshot) => void,
+  opts?: { poolSize?: number },
 ): WorkerPool {
-  const poolSize = Math.min(navigator.hardwareConcurrency || 4, 8);
+  const requested = opts?.poolSize ?? Math.min(navigator.hardwareConcurrency || 4, 8);
+  const poolSize = Math.max(1, Math.min(requested, 32));
   const workers: Worker[] = [];
   for (let i = 0; i < poolSize; i++) {
     workers.push(new Worker(new URL("./computeWorker.ts", import.meta.url), { type: "module" }));

@@ -19,6 +19,19 @@ export function getActivePool(): WorkerPool | null {
   return activePool;
 }
 
+const WORKER_COUNT_KEY = "memviz.workerCount";
+const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
+/** Max pill value shown in the picker — clamped to a sane range. */
+export const WORKER_COUNT_MAX = Math.max(4, Math.min(HW_CONC, 16));
+
+function loadSavedWorkerCount(): number {
+  if (typeof localStorage === "undefined") return Math.min(HW_CONC, 8);
+  const raw = localStorage.getItem(WORKER_COUNT_KEY);
+  const n = raw != null ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n >= 1 && n <= WORKER_COUNT_MAX) return n;
+  return Math.min(HW_CONC, 8);
+}
+
 interface FileState {
   status: "idle" | "loading" | "ready" | "error";
   fileNames: string[];
@@ -31,12 +44,15 @@ interface FileState {
   inFlightRanks: number[];
   /** Size of the worker pool (constant within a load). */
   poolSize: number;
+  /** User-chosen worker count for the next load. Persisted in localStorage. */
+  workerCount: number;
   error: string | null;
   ranks: number[];
   rankData: Map<number, RankData>;
 
   openDirectory: () => Promise<void>;
   openFiles: (files: FileList) => Promise<void>;
+  setWorkerCount: (n: number) => void;
   reset: () => void;
 }
 
@@ -55,6 +71,7 @@ export const useFileStore = create<FileState>((set) => ({
   totalCount: 0,
   inFlightRanks: [],
   poolSize: 0,
+  workerCount: loadSavedWorkerCount(),
   error: null,
   ranks: [],
   rankData: new Map(),
@@ -81,6 +98,14 @@ export const useFileStore = create<FileState>((set) => ({
       .filter((f) => f.name.endsWith(".pickle"))
       .map((f) => ({ name: f.name, reader: () => f.arrayBuffer() }));
     await loadAllParallel(entries, set);
+  },
+
+  setWorkerCount: (n: number) => {
+    const clamped = Math.max(1, Math.min(n, WORKER_COUNT_MAX));
+    if (typeof localStorage !== "undefined") {
+      try { localStorage.setItem(WORKER_COUNT_KEY, String(clamped)); } catch { /* ignore */ }
+    }
+    set({ workerCount: clamped });
   },
 
   reset: () => {
@@ -158,6 +183,7 @@ async function loadAllParallel(
   // Terminate any previous pool before starting a new load.
   if (activePool) activePool.terminate();
 
+  const desiredWorkers = useFileStore.getState().workerCount;
   const pool = createWorkerPool(
     (result: WorkerResult) => {
       rankData.set(result.rank, result.data);
@@ -177,6 +203,7 @@ async function loadAllParallel(
         poolSize: snap.poolSize,
       });
     },
+    { poolSize: desiredWorkers },
   );
   activePool = pool;
 
