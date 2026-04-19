@@ -992,6 +992,7 @@ export default function PhaseTimeline({
       const keys = keysDownRef.current;
       const shift = keys.has("shift");
       const hasYZoom = shift && (keys.has("w") || keys.has("s") || keys.has("arrowup") || keys.has("arrowdown"));
+      const hasYPan  = shift && (keys.has("a") || keys.has("d") || keys.has("arrowleft") || keys.has("arrowright"));
       const hasXNav = !shift && (keys.has("a") || keys.has("d") || keys.has("w") || keys.has("s")
         || keys.has("arrowleft") || keys.has("arrowright") || keys.has("arrowup") || keys.has("arrowdown"));
 
@@ -1017,6 +1018,32 @@ export default function PhaseTimeline({
           const ns = Math.min(peakCap, span / zoomRate);
           nYMin = Math.max(0, c - ns / 2);
           nYMax = Math.min(peakCap, nYMin + ns);
+        }
+        if (nYMin !== yMin0 || nYMax !== yMax0) {
+          manualYRangeRef.current = [nYMin, nYMax];
+          invalidate();
+        }
+      }
+
+      if (hasYPan) {
+        // Shift+A/D → pan Y. D (right) scrolls toward larger bytes
+        // (upward in the plot); A (left) toward the baseline. Seeds
+        // from auto-fit on first use so the first keystroke doesn't
+        // collapse the view.
+        let cur = manualYRangeRef.current;
+        if (!cur) cur = [yRangeRef.current[0], yRangeRef.current[1]];
+        const [yMin0, yMax0] = cur;
+        const span = yMax0 - yMin0;
+        const peakCap = (data.peak_bytes || yMax0) * 1.1;
+        const panRate = span * 0.02;
+        let nYMin = yMin0, nYMax = yMax0;
+        if (keys.has("d") || keys.has("arrowright")) {
+          nYMax = Math.min(peakCap, yMax0 + panRate);
+          nYMin = nYMax - span;
+        }
+        if (keys.has("a") || keys.has("arrowleft")) {
+          nYMin = Math.max(0, yMin0 - panRate);
+          nYMax = nYMin + span;
         }
         if (nYMin !== yMin0 || nYMax !== yMax0) {
           manualYRangeRef.current = [nYMin, nYMax];
@@ -1261,13 +1288,10 @@ export default function PhaseTimeline({
           never gets hidden by tooltips or dark plot backgrounds. */}
       <div className="tl-hint mono">
         <Kbd>WASD</Kbd>
-        <span>navigate</span>
+        <span>pan/zoom X</span>
         <span className="tl-hint-sep">·</span>
-        <Kbd>W</Kbd><span className="tl-hint-slash">/</span><Kbd>S</Kbd>
-        <span>zoom X</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>⇧W</Kbd><span className="tl-hint-slash">/</span><Kbd>⇧S</Kbd>
-        <span>zoom Y</span>
+        <Kbd>⇧WASD</Kbd>
+        <span>pan/zoom Y</span>
         <span className="tl-hint-sep">·</span>
         <Kbd>R</Kbd><span>+drag</span>
         <span>mem ruler</span>
