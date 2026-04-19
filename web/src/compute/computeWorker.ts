@@ -1,19 +1,25 @@
 /**
- * Web Worker: receives compiled WASM Module from main thread, initializes
- * with initSync, processes pickle snapshots, AND parses the WASM JSON
- * output into RankData — all off the main thread.
+ * Web Worker: WASM parse + RankData build, keeps frames worker-local.
  *
- * Main → Worker: { type: "init", wasmModule: WebAssembly.Module }
- * Main → Worker: { type: "process", rank: number, buffer: ArrayBuffer }
+ * Main → Worker: { type: "init", wasmModule }
+ * Main → Worker: { type: "process", rank, buffer }
+ * Main → Worker: { type: "detail", reqId, rank, addr }
+ *
  * Worker → Main: { type: "ready" }
- * Worker → Main: { type: "result", rank: number, data: RankData }   // stripBuffer transferred
- * Worker → Main: { type: "error", rank: number, error: string }
+ * Worker → Main: { type: "result", rank, data }           // stripBuffer transferred
+ * Worker → Main: { type: "detail_response", reqId, frames }
+ * Worker → Main: { type: "error", rank, error }
  */
 
 import { initSync, process_snapshot } from "../../../wasm/pkg/memviz_wasm.js";
 import { parseRank } from "./parseRank";
 
+type Frame = { name: string; filename: string; line: number };
+
 let ready = false;
+// Per-rank frames table. Never sent to main thread; used to answer detail
+// requests on demand.
+const framesCache = new Map<number, Map<number, Frame[]>>();
 
 self.onmessage = (e: MessageEvent) => {
   const { type } = e.data;
@@ -34,10 +40,8 @@ self.onmessage = (e: MessageEvent) => {
     try {
       if (!ready) throw new Error("WASM not initialized");
       const json = process_snapshot(new Uint8Array(buffer), rank, 3000);
-      // Parse + build RankData in the worker. Main thread will only do
-      // a structured-clone receive + Map.set — no JSON.parse, no loops.
-      const data = parseRank(json, rank);
-      // Transfer the Float32 strip buffer zero-copy; the rest structured-clones.
+      const { data, framesByAddr } = parseRank(json, rank);
+      framesCache.set(rank, framesByAddr);
       (self as any).postMessage(
         { type: "result", rank, data },
         [data.stripBuffer.buffer],
@@ -45,5 +49,14 @@ self.onmessage = (e: MessageEvent) => {
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });
     }
+    return;
+  }
+
+  if (type === "detail") {
+    const { reqId, rank, addr } = e.data;
+    const rankFrames = framesCache.get(rank);
+    const frames = rankFrames?.get(addr) ?? [];
+    (self as any).postMessage({ type: "detail_response", reqId, frames });
+    return;
   }
 };

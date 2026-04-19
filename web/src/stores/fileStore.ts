@@ -1,8 +1,22 @@
 import { create } from "zustand";
 import type { RankData } from "../compute";
-import { createWorkerPool, type WorkerResult, type WorkerTask, type LoadPhase } from "../compute/workerPool";
+import {
+  createWorkerPool,
+  type WorkerPool,
+  type WorkerResult,
+  type WorkerTask,
+  type LoadPhase,
+} from "../compute/workerPool";
 
 type FileReader = () => Promise<ArrayBuffer>;
+
+// Active pool is kept alive after parsing finishes so the main thread can
+// ask workers for per-allocation stack traces on demand. Terminated on reset.
+let activePool: WorkerPool | null = null;
+
+export function getActivePool(): WorkerPool | null {
+  return activePool;
+}
 
 interface FileState {
   status: "idle" | "loading" | "ready" | "error";
@@ -62,7 +76,11 @@ export const useFileStore = create<FileState>((set) => ({
     await loadAllParallel(entries, set);
   },
 
-  reset: () =>
+  reset: () => {
+    if (activePool) {
+      activePool.terminate();
+      activePool = null;
+    }
     set({
       status: "idle",
       fileNames: [],
@@ -74,7 +92,8 @@ export const useFileStore = create<FileState>((set) => ({
       error: null,
       ranks: [],
       rankData: new Map(),
-    }),
+    });
+  },
 }));
 
 async function loadAllParallel(
@@ -105,16 +124,31 @@ async function loadAllParallel(
   const rankData = new Map<number, RankData>();
   let firstDone = false;
 
-  const pool = createWorkerPool(
-    (result: WorkerResult) => {
-      // Worker already parsed into RankData; main thread only does the Map.set.
-      rankData.set(result.rank, result.data);
-
-      // Only push to React on first rank (show UI immediately)
+  // Throttle rank flushes: if two ranks complete in the same microtask, they
+  // share one set() call. Prevents the burst of 8 near-simultaneous worker
+  // completions from triggering 8 React commits.
+  let flushPending = false;
+  const scheduleFlush = () => {
+    if (flushPending) return;
+    flushPending = true;
+    queueMicrotask(() => {
+      flushPending = false;
       if (!firstDone) {
         firstDone = true;
         set({ status: "ready", rankData: new Map(rankData) });
+      } else {
+        set({ rankData: new Map(rankData) });
       }
+    });
+  };
+
+  // Terminate any previous pool before starting a new load.
+  if (activePool) activePool.terminate();
+
+  const pool = createWorkerPool(
+    (result: WorkerResult) => {
+      rankData.set(result.rank, result.data);
+      scheduleFlush();
     },
     (rank, error) => {
       console.error(`[memviz] rank ${rank} failed:`, error);
@@ -129,13 +163,15 @@ async function loadAllParallel(
       });
     },
   );
+  activePool = pool;
 
   await pool.processAll(tasks);
-  pool.terminate();
+  // Keep the pool alive — workers still hold per-rank framesCache for
+  // on-demand getDetail lookups. Terminated on reset() only.
+
   if (rankData.size === 0) {
     set({ status: "error", error: "All ranks failed to parse", progress: 1 });
   } else {
-    // Final flush: all ranks done, push complete data to React once
     set({ status: "ready", rankData: new Map(rankData), progress: 1 });
   }
 }

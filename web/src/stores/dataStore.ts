@@ -10,7 +10,8 @@ import type {
   TimelineBlock,
   AllocationDetail,
 } from "../types/timeline";
-import { getAllocationDetail, type RankData, type Anomaly, type Allocation } from "../compute";
+import type { RankData, Anomaly, Allocation } from "../compute";
+import { getActivePool } from "./fileStore";
 
 interface DataState {
   ranks: number[];
@@ -37,7 +38,7 @@ interface DataState {
 
   setCurrentRank: (rank: number) => void;
   loadFromFiles: (rankData: Map<number, RankData>) => void;
-  getDetail: (rank: number, addr: number) => AllocationDetail | null;
+  getDetail: (rank: number, addr: number) => Promise<AllocationDetail | null>;
   focusAnomaly: (anomaly: Anomaly) => void;
   clearFocus: () => void;
   resetData: () => void;
@@ -128,10 +129,23 @@ export const useDataStore = create<DataState>((set, get) => ({
     }
   },
 
-  getDetail: (rank: number, addr: number): AllocationDetail | null => {
+  getDetail: async (rank: number, addr: number): Promise<AllocationDetail | null> => {
     const allocs = get()._allocCache.get(rank);
-    if (!allocs) return null;
-    return getAllocationDetail(allocs, addr);
+    const a = allocs?.find((x) => x.addr === addr);
+    if (!a) return null;
+    // Frames live in the worker — fetch them asynchronously, off the
+    // main-thread critical path. Returns quickly with frames=[] if the
+    // worker pool has already been torn down.
+    const pool = getActivePool();
+    const frames = pool ? await pool.getDetail(rank, addr) : [];
+    return {
+      addr: a.addr,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_us: a.free_us,
+      top_frame: a.top_frame,
+      frames,
+    };
   },
 
   focusAnomaly: (anomaly: Anomaly) => {

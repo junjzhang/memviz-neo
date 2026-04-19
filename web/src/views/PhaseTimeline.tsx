@@ -125,8 +125,11 @@ export default function PhaseTimeline({
       const block = blocks.find((b) => b.addr === focusedAddr) ?? null;
       setSelectedBlock(block);
       if (block) {
-        const d = useDataStore.getState().getDetail(currentRank, block.addr);
-        setDetail(d);
+        let cancelled = false;
+        useDataStore.getState().getDetail(currentRank, block.addr).then((d) => {
+          if (!cancelled) setDetail(d);
+        });
+        return () => { cancelled = true; };
       }
     }
   }, [focusedAddr, blocks, currentRank]);
@@ -649,8 +652,9 @@ export default function PhaseTimeline({
                 setSelectedBlock(block);
                 setDetail(null);
                 if (block) {
-                  const d = useDataStore.getState().getDetail(currentRank, block.addr);
-                  if (d) setDetail(d);
+                  useDataStore.getState().getDetail(currentRank, block.addr).then((d) => {
+                    if (d) setDetail(d);
+                  });
                 }
                 selStartRef.current = null;
                 setSelRect(null);
@@ -662,8 +666,9 @@ export default function PhaseTimeline({
           setSelectedBlock(hit);
           setDetail(null);
           if (hit) {
-            const d = useDataStore.getState().getDetail(currentRank, hit.addr);
-            if (d) setDetail(d);
+            useDataStore.getState().getDetail(currentRank, hit.addr).then((d) => {
+              if (d) setDetail(d);
+            });
           }
         }
       }

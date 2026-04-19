@@ -3,7 +3,10 @@ import type { RankSummary } from "../types/snapshot";
 import { formatBytes } from "../utils";
 
 interface Props {
-  data: RankSummary[];
+  /** Every rank we intend to show a slot for, including ones still loading. */
+  allRanks: number[];
+  /** Ranks already parsed (map keyed by rank number). Missing entries render as placeholders. */
+  summaries: Map<number, RankSummary>;
   currentRank: number;
   onSelectRank: (rank: number) => void;
 }
@@ -11,52 +14,65 @@ interface Props {
 const CELL_MIN_H = 14;
 const CELL_MAX_H = 52;
 
-export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
-  const [hover, setHover] = useState<{ rank: RankSummary; x: number; y: number } | null>(null);
+export default function MultiRank({ allRanks, summaries, currentRank, onSelectRank }: Props) {
+  const [hover, setHover] = useState<
+    { rank: number; summary: RankSummary | null; x: number; y: number } | null
+  >(null);
 
-  if (!data.length) return null;
+  if (allRanks.length === 0) return null;
 
-  const maxReserved = Math.max(...data.map((d) => d.total_reserved));
-  const selected = data.find((d) => d.rank === currentRank) ?? data[0];
+  let maxReserved = 0;
+  for (const s of summaries.values()) {
+    if (s.total_reserved > maxReserved) maxReserved = s.total_reserved;
+  }
+  if (maxReserved === 0) maxReserved = 1;
+
+  const selectedSummary = summaries.get(currentRank) ?? null;
 
   return (
     <div>
-      <HeroCard rank={selected} maxReserved={maxReserved} />
+      {selectedSummary ? (
+        <HeroCard rank={selectedSummary} maxReserved={maxReserved} />
+      ) : (
+        <HeroPlaceholder rank={currentRank} />
+      )}
 
-      <div
-        className="mr-strip"
-        onMouseLeave={() => setHover(null)}
-      >
-        {data.map((r) => {
-          const activeH = (r.active_bytes / maxReserved) * CELL_MAX_H;
-          const inactiveH = (r.inactive_bytes / maxReserved) * CELL_MAX_H;
-          const totalH = Math.max(CELL_MIN_H, activeH + inactiveH);
-          const isSelected = r.rank === currentRank;
+      <div className="mr-strip" onMouseLeave={() => setHover(null)}>
+        {allRanks.map((r) => {
+          const summary = summaries.get(r) ?? null;
+          const isSelected = r === currentRank;
+          const loaded = summary !== null;
+          const activeH = loaded ? (summary.active_bytes / maxReserved) * CELL_MAX_H : 0;
+          const inactiveH = loaded ? (summary.inactive_bytes / maxReserved) * CELL_MAX_H : 0;
           return (
             <button
-              key={r.rank}
-              className={"mr-cell" + (isSelected ? " is-selected" : "")}
-              onClick={() => onSelectRank(r.rank)}
+              key={r}
+              className={
+                "mr-cell" +
+                (isSelected ? " is-selected" : "") +
+                (loaded ? "" : " is-pending")
+              }
+              onClick={() => onSelectRank(r)}
               onMouseMove={(e) => {
                 const host = e.currentTarget.parentElement!.getBoundingClientRect();
                 setHover({
                   rank: r,
+                  summary,
                   x: e.clientX - host.left,
                   y: e.clientY - host.top,
                 });
               }}
-              aria-label={`rank ${r.rank}`}
+              aria-label={`rank ${r}${loaded ? "" : " (loading)"}`}
               title=""
             >
-              <span
-                className="mr-cell-active"
-                style={{ height: `${activeH}px` }}
-              />
-              <span
-                className="mr-cell-inactive"
-                style={{ height: `${inactiveH}px` }}
-              />
-              {totalH < CELL_MIN_H && <span className="mr-cell-placeholder" />}
+              {loaded ? (
+                <>
+                  <span className="mr-cell-active" style={{ height: `${activeH}px` }} />
+                  <span className="mr-cell-inactive" style={{ height: `${inactiveH}px` }} />
+                </>
+              ) : (
+                <span className="mr-cell-pending" />
+              )}
             </button>
           );
         })}
@@ -71,15 +87,21 @@ export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
             }}
           >
             <div className="display mr-tooltip-eyebrow">
-              Rank {String(hover.rank.rank).padStart(2, "0")}
+              Rank {String(hover.rank).padStart(2, "0")}
             </div>
-            <div style={{ color: "var(--fg)", marginTop: 2 }}>
-              {formatBytes(hover.rank.total_allocated)}
-              <span className="faint"> / {formatBytes(hover.rank.total_reserved)}</span>
-            </div>
-            <div className="faint" style={{ fontSize: 10 }}>
-              {((hover.rank.total_allocated / hover.rank.total_reserved) * 100).toFixed(1)}% util
-            </div>
+            {hover.summary ? (
+              <>
+                <div style={{ color: "var(--fg)", marginTop: 2 }}>
+                  {formatBytes(hover.summary.total_allocated)}
+                  <span className="faint"> / {formatBytes(hover.summary.total_reserved)}</span>
+                </div>
+                <div className="faint" style={{ fontSize: 10 }}>
+                  {((hover.summary.total_allocated / hover.summary.total_reserved) * 100).toFixed(1)}% util
+                </div>
+              </>
+            ) : (
+              <div className="faint" style={{ marginTop: 2 }}>loading…</div>
+            )}
           </div>
         )}
       </div>
@@ -95,6 +117,18 @@ export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
           border: 1px solid var(--border);
           border-left: 2px solid var(--accent);
           margin-bottom: 20px;
+        }
+        .mr-hero-placeholder {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          padding: 20px 24px;
+          background: var(--bg-elev);
+          border: 1px dashed var(--border-strong);
+          margin-bottom: 20px;
+          color: var(--fg-faint);
+          font-family: var(--font-mono);
+          font-size: 12px;
         }
         .mr-hero-rank {
           font-family: var(--font-display);
@@ -167,11 +201,21 @@ export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
           display: block;
           background: var(--border);
         }
-        .mr-cell-placeholder {
+        .mr-cell-pending {
           display: block;
           flex: 1;
-          background: var(--border);
-          min-height: 1px;
+          background: repeating-linear-gradient(
+            45deg,
+            var(--border) 0 4px,
+            transparent 4px 8px
+          );
+          opacity: 0.55;
+          animation: mr-pending-pulse 1.8s ease-in-out infinite;
+          min-height: ${CELL_MIN_H}px;
+        }
+        @keyframes mr-pending-pulse {
+          0%, 100% { opacity: 0.35; }
+          50%      { opacity: 0.75; }
         }
         .mr-cell:hover .mr-cell-active { background: var(--fg-muted); }
         .mr-cell.is-selected .mr-cell-active { background: var(--accent); }
@@ -184,6 +228,11 @@ export default function MultiRank({ data, currentRank, onSelectRank }: Props) {
           height: 2px;
           background: var(--accent);
         }
+        .mr-cell.is-pending {
+          cursor: default;
+        }
+        .mr-cell.is-pending:hover { transform: none; }
+
         .mr-tooltip {
           position: absolute;
           padding: 6px 10px;
@@ -258,6 +307,17 @@ function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: numbe
       <Stat label="Inactive" value={formatBytes(rank.inactive_bytes)} />
       <Stat label="Allocated" value={formatBytes(rank.total_allocated)} accent />
       <Stat label="Reserved" value={formatBytes(rank.total_reserved)} />
+    </div>
+  );
+}
+
+function HeroPlaceholder({ rank }: { rank: number }) {
+  return (
+    <div className="mr-hero-placeholder">
+      <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+      <span>
+        Rank {String(rank).padStart(2, "0")} — loading snapshot…
+      </span>
     </div>
   );
 }

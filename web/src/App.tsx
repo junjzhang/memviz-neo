@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useTransition } from "react";
 import { ConfigProvider, theme } from "antd";
 import Layout from "./components/Layout";
 import FileSelector from "./components/FileSelector";
@@ -114,11 +114,22 @@ function Dashboard() {
     setCurrentRank,
   } = useDataStore();
 
+  const allRanks = useFileStore((s) => s.ranks);
+  const completedCount = useFileStore((s) => s.completedCount);
+  const totalCount = useFileStore((s) => s.totalCount);
+  const stillLoading = completedCount < totalCount;
+
   const [, startTransition] = useTransition();
   const selectRank = useCallback(
     (r: number) => startTransition(() => setCurrentRank(r)),
     [setCurrentRank],
   );
+
+  const summariesByRank = useMemo(() => {
+    const m = new Map<number, (typeof multiRankOverview)[number]>();
+    for (const s of multiRankOverview) m.set(s.rank, s);
+    return m;
+  }, [multiRankOverview]);
 
   const [tlRef, tlWidth] = useContainerWidth();
   const [gridRef, gridWidth] = useContainerWidth();
@@ -147,10 +158,30 @@ function Dashboard() {
         <Section
           eyebrow="01"
           title="Multi-Rank Overview"
-          meta={`${multiRankOverview.length} ranks`}
+          meta={
+            stillLoading ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <span
+                  className="mr-spinner"
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: "var(--accent)",
+                    animation: "fs-pulse 1.1s ease-in-out infinite",
+                  }}
+                />
+                <span className="mono hl">{completedCount}</span>
+                <span className="faint">/ {totalCount} loading</span>
+              </span>
+            ) : (
+              `${allRanks.length} ranks`
+            )
+          }
         >
           <MultiRank
-            data={multiRankOverview}
+            allRanks={allRanks.length > 0 ? allRanks : multiRankOverview.map((s) => s.rank)}
+            summaries={summariesByRank}
             currentRank={currentRank}
             onSelectRank={selectRank}
           />

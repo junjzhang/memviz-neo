@@ -1,7 +1,12 @@
 import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../types/snapshot";
-import type { TimelineData, TimelineBlock, AllocationDetail } from "../types/timeline";
+import type { TimelineData, TimelineBlock } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 
+/**
+ * Light allocation record — no `frames` array. Full stack traces live in
+ * the worker's per-rank framesCache and are fetched lazily via the pool's
+ * detail channel (see dataStore.getDetail).
+ */
 export interface Allocation {
   addr: number;
   size: number;
@@ -9,6 +14,7 @@ export interface Allocation {
   free_requested_us: number;
   free_us: number;
   top_frame: string;
+  /** Always empty on the main thread (worker keeps the real data). */
   frames: { name: string; filename: string; line: number }[];
 }
 
@@ -27,19 +33,6 @@ export interface RankData {
   stripCount: number;
   // Per-rank max bytes (for full-view fast path, avoids iterating blocks)
   maxBytesFull: number;
-}
-
-export function getAllocationDetail(allocations: Allocation[], addr: number): AllocationDetail | null {
-  const a = allocations.find((a) => a.addr === addr);
-  if (!a) return null;
-  return {
-    addr: a.addr,
-    size: a.size,
-    alloc_us: a.alloc_us,
-    free_us: a.free_us,
-    top_frame: a.top_frame,
-    frames: a.frames,
-  };
 }
 
 export type { Anomaly } from "./anomalies";

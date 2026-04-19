@@ -8,19 +8,36 @@ import { detectAnomalies } from "./anomalies";
 import type { Allocation, RankData } from "./index";
 import { STRIP_PALETTE_RGB } from "./palette";
 
-export function parseRank(json: string, _rank: number): RankData {
+export interface ParseResult {
+  data: RankData;
+  /**
+   * Frames table kept worker-local. Not sent to the main thread to avoid
+   * the dominant structured-clone cost (each rank can have 20k+ allocations
+   * each carrying ~25 frame dicts). Main thread fetches on demand via
+   * the worker's detail channel.
+   */
+  framesByAddr: Map<number, { name: string; filename: string; line: number }[]>;
+}
+
+export function parseRank(json: string, _rank: number): ParseResult {
   const raw = JSON.parse(json);
   const summary: RankSummary = raw.summary;
 
-  const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => ({
-    addr: a.addr,
-    size: a.size,
-    alloc_us: a.alloc_us,
-    free_requested_us: a.free_requested_us,
-    free_us: a.free_us,
-    top_frame: a.top_frame,
-    frames: a.frames,
-  }));
+  const framesByAddr = new Map<number, { name: string; filename: string; line: number }[]>();
+  const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => {
+    if (a.frames && a.frames.length) framesByAddr.set(a.addr, a.frames);
+    return {
+      addr: a.addr,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_requested_us: a.free_requested_us,
+      free_us: a.free_us,
+      top_frame: a.top_frame,
+      // frames dropped here; kept in framesByAddr (worker-local).
+      frames: [],
+    };
+  });
+  // detectAnomalies uses addr/size/time/top_frame; it doesn't need frames.
   const anomalies: Anomaly[] = detectAnomalies(allocations, raw.timeline.time_max);
 
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
@@ -121,7 +138,7 @@ export function parseRank(json: string, _rank: number): RankData {
     }
   }
 
-  return {
+  const data: RankData = {
     summary,
     treemap,
     segments,
@@ -141,4 +158,5 @@ export function parseRank(json: string, _rank: number): RankData {
     stripCount,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
   };
+  return { data, framesByAddr };
 }
