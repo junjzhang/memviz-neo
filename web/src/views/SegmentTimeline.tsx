@@ -11,6 +11,11 @@ interface Props {
   height: number;
   /** Shared with PhaseTimeline so pan/zoom stays in lockstep. */
   viewRangeRef: React.MutableRefObject<[number, number]>;
+  /** "time" = μs axis; "event" = alloc/free-event ordinal axis. */
+  mode: "time" | "event";
+  /** Sorted unique event times (μs relative to data.time_min). Required
+   *  in "event" mode; ignored in "time" mode. */
+  eventTimes: Float64Array | null;
 }
 
 const ROW_H = 26;           // height per segment row in CSS px
@@ -36,7 +41,7 @@ const FONT_MONO = '10px "JetBrains Mono", ui-monospace, monospace';
  * Time axis is read from `viewRangeRef` which is shared with
  * PhaseTimeline — panning / zooming either view moves both.
  */
-export default function SegmentTimeline({ data, rows, width, height, viewRangeRef }: Props) {
+export default function SegmentTimeline({ data, rows, width, height, viewRangeRef, mode, eventTimes }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const glCanvasRef = useRef<HTMLCanvasElement>(null);
   const glRef = useRef<GLState | null>(null);
@@ -55,6 +60,18 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
     const buf = new Float32Array(totalAllocs * 7);
     const tMax = data.time_max;
     const tOrigin = data.time_min;
+    // Reused binary search for event-mode X mapping.
+    const et = eventTimes;
+    const eventIdx = (tUsNorm: number): number => {
+      if (!et) return 0;
+      let lo = 0, hi = et.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (et[mid] < tUsNorm) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
     let w = 0;
     for (let ri = 0; ri < rows.length; ri++) {
       const row = rows[ri];
@@ -64,15 +81,19 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
       const inv = 1 / row.totalSize;
       for (const a of row.allocs) {
         const frac = a.size * inv;
-        // alloc pixel range within row (top to bottom)
         const yTopPx = rowYTop + (a.offsetInSeg * inv) * rowHPx;
         const hPx = Math.max(1, frac * rowHPx);
         const yBotPx = yTopPx + hPx;
-        // Flip to "bytes axis pointing up with origin at canvas bottom"
-        // so the existing drawStrips shader renders it in the right spot.
         const yBotBytes = height - yBotPx;
-        buf[w * 7]     = a.alloc_us - tOrigin;
-        buf[w * 7 + 1] = (a.free_us < 0 ? tMax : a.free_us) - tOrigin;
+        const freeUs = a.free_us < 0 ? tMax : a.free_us;
+        let x0 = a.alloc_us - tOrigin;
+        let x1 = freeUs - tOrigin;
+        if (mode === "event" && et) {
+          x0 = eventIdx(x0);
+          x1 = eventIdx(x1);
+        }
+        buf[w * 7]     = x0;
+        buf[w * 7 + 1] = x1;
         buf[w * 7 + 2] = yBotBytes;
         buf[w * 7 + 3] = hPx;
         buf[w * 7 + 4] = a.color[0];
@@ -82,7 +103,7 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
       }
     }
     return { buf, count: w };
-  }, [rows, data.time_min, data.time_max, height]);
+  }, [rows, data.time_min, data.time_max, height, mode, eventTimes]);
 
   // Upload to GPU whenever pack changes.
   useEffect(() => {
@@ -123,13 +144,18 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
       // WebGL strip pass. We pass maxBytes = height so the y axis spans
       // the whole canvas in pixel units, matching how stripPack encoded y.
       if (glRef.current && stripPack.count > 0) {
+        // In event mode the packed x values are already 0-based event
+        // indices; in time mode they were packed as (t - time_min). The
+        // timeOrigin we pass to drawStrips must match the packing so
+        // shader normalization lines up.
+        const timeOrigin = mode === "event" ? 0 : data.time_min;
         drawStrips(
           glRef.current,
           width, height,
           plotLeft, 0, plotW, height,
           vr[0], vr[1],
           height,                // "maxBytes" == canvas height in px
-          data.time_min,
+          timeOrigin,
         );
       }
 
@@ -180,7 +206,7 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
     };
     rafId = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(rafId);
-  }, [rows, width, height, plotLeft, plotW, data.time_min, viewRangeRef, stripPack.count]);
+  }, [rows, width, height, plotLeft, plotW, data.time_min, viewRangeRef, stripPack.count, mode]);
 
   // No mouse handlers here — pan/zoom is driven via WASD on the Memory
   // Timeline above; this view reads the shared viewRangeRef and follows

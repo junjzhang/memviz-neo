@@ -65,7 +65,16 @@ export interface RankData {
   // Pre-packed GPU buffer for WebGL instanced rendering.
   // 7 floats per strip: (t_start, t_end, y_offset, height, r, g, b)
   stripBuffer: Float32Array;
+  /** Same shape as stripBuffer, but with t_start/t_end replaced by
+   *  event indices (position in `eventTimes`). Lets the timeline view
+   *  switch between "actual μs" and "event ordinal" X axis by swapping
+   *  GPU buffers, no re-layout needed. */
+  stripBufferEvent: Float32Array;
   stripCount: number;
+  /** Sorted unique alloc/free event times for this rank, relative to
+   *  timeline.time_min. Used for (time_us ↔ event_idx) mapping when the
+   *  user toggles the X axis mode. */
+  eventTimes: Float64Array;
   // Per-rank max bytes (for full-view fast path, avoids iterating blocks)
   maxBytesFull: number;
   /** Per-segment allocator row data for the SegmentTimeline view. Sorted

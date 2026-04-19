@@ -11,6 +11,10 @@ export interface RankSummary {
    *  real allocations we can't attribute to any in-window call stack.
    *  Already included in active_bytes / total_allocated. */
   baseline?: number;
+  /** Peak GPU memory during the snapshot window (baseline + max net
+   *  running allocations). This is the OOM-relevant "worst moment"
+   *  number; active_bytes only reflects end-of-window state. */
+  peak_bytes?: number;
   /** Raw PYTORCH_CUDA_ALLOC_CONF env var string, e.g.
    *  "expandable_segments:True". Empty if the snapshot didn't record it. */
   alloc_conf?: string;

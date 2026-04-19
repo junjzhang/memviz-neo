@@ -7,6 +7,8 @@ export default function Layout({ children }: { children: ReactNode }) {
   const summary = useDataStore((s) => s.summary);
   const loading = useFileStore((s) => s.status === "loading" && s.progress === 0);
   const hasData = useFileStore((s) => s.ranks.length > 0);
+  const xAxisMode = useDataStore((s) => s.xAxisMode);
+  const setXAxisMode = useDataStore((s) => s.setXAxisMode);
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
   const handleReset = () => {
@@ -42,6 +44,24 @@ export default function Layout({ children }: { children: ReactNode }) {
           {hasData && (
             <div className="rank-badge mono" title="Use Multi-Rank Overview below to switch">
               R{String(currentRank).padStart(2, "0")}
+            </div>
+          )}
+          {hasData && (
+            <div className="axis-toggle mono" role="group" aria-label="Timeline X axis">
+              <button
+                className={xAxisMode === "time" ? "is-active" : ""}
+                onClick={() => setXAxisMode("time")}
+                title="X axis = absolute microseconds"
+              >
+                time
+              </button>
+              <button
+                className={xAxisMode === "event" ? "is-active" : ""}
+                onClick={() => setXAxisMode("event")}
+                title="X axis = alloc/free event ordinal — dense phases stretch out, idle gaps collapse"
+              >
+                event
+              </button>
             </div>
           )}
         </div>
@@ -133,6 +153,31 @@ export default function Layout({ children }: { children: ReactNode }) {
           letter-spacing: -0.02em;
           color: var(--fg);
         }
+        .axis-toggle {
+          display: inline-flex;
+          align-items: stretch;
+          border: 1px solid var(--border);
+          height: 26px;
+        }
+        .axis-toggle button {
+          appearance: none;
+          background: transparent;
+          border: none;
+          padding: 0 10px;
+          font-family: var(--font-mono);
+          font-size: 11px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--fg-faint);
+          cursor: pointer;
+        }
+        .axis-toggle button:hover { color: var(--fg); }
+        .axis-toggle button.is-active {
+          background: var(--accent-bg);
+          color: var(--accent);
+        }
+        .axis-toggle button + button { border-left: 1px solid var(--border); }
+
         .rank-badge {
           display: inline-flex;
           align-items: center;

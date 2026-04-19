@@ -402,7 +402,7 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
         for b in &s.blocks { bc += 1; if b.state == "active_allocated" { ab += b.size; } else if b.state == "inactive" { ib += b.size; } }
     }
     j.push_str(&format!(
-        "\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib},\"baseline\":{baseline},\"alloc_conf\":{},\"expandable_segments\":{},\"max_split_size\":{},\"gc_threshold\":{}}},",
+        "\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib},\"baseline\":{baseline},\"peak_bytes\":{peak},\"alloc_conf\":{},\"expandable_segments\":{},\"max_split_size\":{},\"gc_threshold\":{}}},",
         json_str(&meta.alloc_conf),
         meta.expandable_segments,
         meta.max_split_size,

@@ -17,7 +17,7 @@ interface HoverInfo { rank: number; x: number; y: number; }
 
 export default function MultiRank({ allRanks, currentRank, onSelectRank }: Props) {
   const [hover, setHover] = useState<HoverInfo | null>(null);
-  const maxReserved = useRankSummaries((s) => s.maxReserved);
+  const maxPeak = useRankSummaries((s) => s.maxPeak);
   const selectedSummary = useRankSummaries((s) => s.summaries[currentRank]);
 
   const handleLeave = useCallback(() => setHover(null), []);
@@ -28,7 +28,7 @@ export default function MultiRank({ allRanks, currentRank, onSelectRank }: Props
   return (
     <div>
       {selectedSummary ? (
-        <HeroCard rank={selectedSummary} maxReserved={maxReserved} />
+        <HeroCard rank={selectedSummary} maxPeak={maxPeak} />
       ) : (
         <HeroPlaceholder rank={currentRank} />
       )}
@@ -39,7 +39,7 @@ export default function MultiRank({ allRanks, currentRank, onSelectRank }: Props
             key={r}
             rank={r}
             isSelected={r === currentRank}
-            maxReserved={maxReserved}
+            maxPeak={maxPeak}
             onSelect={onSelectRank}
             onHover={handleHover}
           />
@@ -56,7 +56,7 @@ export default function MultiRank({ allRanks, currentRank, onSelectRank }: Props
 interface CellProps {
   rank: number;
   isSelected: boolean;
-  maxReserved: number;
+  maxPeak: number;
   onSelect: (rank: number) => void;
   onHover: (info: HoverInfo) => void;
 }
@@ -65,17 +65,18 @@ interface CellProps {
 // selector shallow-compares, so when setSummary lands for rank R, the
 // summaries map identity changes but `summaries[otherRank]` still
 // returns the same reference — unrelated cells skip re-render.
-const Cell = memo(function Cell({ rank, isSelected, maxReserved, onSelect, onHover }: CellProps) {
+const Cell = memo(function Cell({ rank, isSelected, maxPeak, onSelect, onHover }: CellProps) {
   const summary = useRankSummaries((s) => s.summaries[rank]);
   const loaded = summary !== undefined;
-  // active_bytes includes pre-window allocations; split them visually so
-  // "what we can actually attribute" (windowActive) and "what was already
-  // there when tracing started" (baseline) show as distinct layers.
-  const baseline = loaded ? Math.min(summary.baseline ?? 0, summary.active_bytes) : 0;
-  const windowActiveBytes = loaded ? Math.max(0, summary.active_bytes - baseline) : 0;
-  const baselineH = loaded ? (baseline / maxReserved) * CELL_MAX_H : 0;
-  const windowActiveH = loaded ? (windowActiveBytes / maxReserved) * CELL_MAX_H : 0;
-  const inactiveH = loaded ? (summary.inactive_bytes / maxReserved) * CELL_MAX_H : 0;
+  // Cell height encodes *peak* memory (OOM-relevant worst moment), not
+  // the snapshot's end-of-window state. Baseline (pre-window) is
+  // stacked at the bottom so the "what can't be attributed" vs
+  // "what new code added" split stays visible.
+  const peak = loaded ? (summary.peak_bytes ?? summary.active_bytes) : 0;
+  const baseline = loaded ? Math.min(summary.baseline ?? 0, peak) : 0;
+  const windowDelta = loaded ? Math.max(0, peak - baseline) : 0;
+  const baselineH = loaded ? (baseline / maxPeak) * CELL_MAX_H : 0;
+  const peakH = loaded ? (windowDelta / maxPeak) * CELL_MAX_H : 0;
 
   const handleClick = useCallback(() => onSelect(rank), [onSelect, rank]);
   const handleMove = useCallback(
@@ -100,11 +101,10 @@ const Cell = memo(function Cell({ rank, isSelected, maxReserved, onSelect, onHov
     >
       {loaded ? (
         <>
-          {/* Order is reverse because .mr-cell uses column-reverse:
-              bottom → top = baseline, window-active, inactive. */}
+          {/* .mr-cell uses column-reverse, so first child is bottom:
+              baseline (pre-window) then peak-delta (window max above baseline). */}
           <span className="mr-cell-baseline" style={{ height: `${baselineH}px` }} />
-          <span className="mr-cell-active" style={{ height: `${windowActiveH}px` }} />
-          <span className="mr-cell-inactive" style={{ height: `${inactiveH}px` }} />
+          <span className="mr-cell-active" style={{ height: `${peakH}px` }} />
         </>
       ) : (
         <span className="mr-cell-pending" />
@@ -130,11 +130,11 @@ function HoverTooltip({ rank, x }: { rank: number; x: number }) {
       {summary ? (
         <>
           <div style={{ color: "var(--fg)", marginTop: 2 }}>
-            {formatBytes(summary.total_allocated)}
+            peak {formatBytes(summary.peak_bytes ?? summary.active_bytes)}
             <span className="faint"> / {formatBytes(summary.total_reserved)}</span>
           </div>
           <div className="faint" style={{ fontSize: 10 }}>
-            {((summary.total_allocated / summary.total_reserved) * 100).toFixed(1)}% util
+            end {formatBytes(summary.active_bytes)}
           </div>
           {summary.baseline != null && summary.baseline > 0 && (
             <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>
@@ -149,15 +149,15 @@ function HoverTooltip({ rank, x }: { rank: number; x: number }) {
   );
 }
 
-function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: number }) {
-  const baseline = Math.min(rank.baseline ?? 0, rank.active_bytes);
-  const windowActive = Math.max(0, rank.active_bytes - baseline);
-  const baselinePct = (baseline / maxReserved) * 100;
-  const windowActivePct = (windowActive / maxReserved) * 100;
-  const inactivePct = (rank.inactive_bytes / maxReserved) * 100;
+function HeroCard({ rank, maxPeak }: { rank: RankSummary; maxPeak: number }) {
+  const peak = rank.peak_bytes ?? rank.active_bytes;
+  const baseline = Math.min(rank.baseline ?? 0, peak);
+  const windowDelta = Math.max(0, peak - baseline);
+  const baselinePct = (baseline / maxPeak) * 100;
+  const peakPct = (windowDelta / maxPeak) * 100;
   const utilPct =
     rank.total_reserved > 0
-      ? ((rank.total_allocated / rank.total_reserved) * 100).toFixed(1)
+      ? ((peak / rank.total_reserved) * 100).toFixed(1)
       : "—";
 
   return (
@@ -173,18 +173,17 @@ function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: numbe
               title={`pre-window baseline · ${formatBytes(baseline)}`}
             />
           )}
-          <div className="mr-hero-bar-active" style={{ width: `${windowActivePct}%` }} />
-          <div className="mr-hero-bar-inactive" style={{ width: `${inactivePct}%` }} />
+          <div className="mr-hero-bar-active" style={{ width: `${peakPct}%` }} />
         </div>
         <div className="mr-hero-bar-caption">
-          <span>allocated vs max reserved across ranks</span>
-          <span>{utilPct}% util</span>
+          <span>peak vs max peak across ranks</span>
+          <span>{utilPct}% of reserved</span>
         </div>
       </div>
 
-      <Stat label="Active" value={formatBytes(rank.active_bytes)} />
+      <Stat label="Peak" value={formatBytes(peak)} accent />
       <Stat label="Baseline" value={formatBytes(baseline)} />
-      <Stat label="Allocated" value={formatBytes(rank.total_allocated)} accent />
+      <Stat label="Active (end)" value={formatBytes(rank.active_bytes)} />
       <Stat label="Reserved" value={formatBytes(rank.total_reserved)} />
     </div>
   );

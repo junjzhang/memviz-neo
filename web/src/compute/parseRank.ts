@@ -288,6 +288,28 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   // so the final y axis maps to absolute GPU memory bytes. maxBytesFull
   // therefore starts at `baseline` and grows as strips pile on top.
   let maxBytesFull = baseline;
+
+  // Event axis: collect sorted unique event timestamps (relative to
+  // timeMin). Each alloc / free marks one event. The live-at-end edge
+  // also lands at timeMax. This is what the "event" X-axis mode uses
+  // to compress idle gaps and stretch allocation-dense phases.
+  const eventSet = new Set<number>();
+  eventSet.add(0);                    // tMin edge
+  eventSet.add(timeMax - timeMin);    // tMax edge (alive strips close here)
+  for (const a of topAllocsIR) {
+    eventSet.add(a.alloc_us - timeMin);
+    if (a.free_us >= 0) eventSet.add(a.free_us - timeMin);
+  }
+  const eventTimes = Float64Array.from([...eventSet].sort((a, b) => a - b));
+  function eventIdxAt(tNorm: number): number {
+    let lo = 0, hi = eventTimes.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (eventTimes[mid] < tNorm) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
   let writeIdx = 0;
   // Per-hueKey instance counter so repeated allocs from the same call
   // site get lightness-shifted shades in the same color family.
@@ -389,6 +411,21 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const segmentRows: SegmentRow[] = [...segRowByAddr.values()]
     .sort((a, b) => b.totalSize - a.totalSize);
 
+  // Build the event-axis strip buffer by mapping each t_start/t_end to
+  // its position in the sorted event list. Y / color columns copy over
+  // unchanged. One pass, O(strips × log(events)).
+  const stripBufferEvent = new Float32Array(stripBuffer.length);
+  for (let s = 0; s < totalStrips; s++) {
+    const off = s * STRIP_FLOATS;
+    stripBufferEvent[off]     = eventIdxAt(stripBuffer[off]);
+    stripBufferEvent[off + 1] = eventIdxAt(stripBuffer[off + 1]);
+    stripBufferEvent[off + 2] = stripBuffer[off + 2];
+    stripBufferEvent[off + 3] = stripBuffer[off + 3];
+    stripBufferEvent[off + 4] = stripBuffer[off + 4];
+    stripBufferEvent[off + 5] = stripBuffer[off + 5];
+    stripBufferEvent[off + 6] = stripBuffer[off + 6];
+  }
+
   // ---- Flame graph aggregate (call-stack → memory pressure) ----
   // Build a prefix trie keyed by stack frame index, weighted by
   // size × lifetime (bytes·μs). Only user-relevant frames participate:
@@ -463,6 +500,8 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     timelineBlocks,
     anomalies,
     stripBuffer,
+    stripBufferEvent,
+    eventTimes,
     stripCount: totalStrips,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
     segmentRows,

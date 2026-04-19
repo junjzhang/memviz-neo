@@ -13,9 +13,12 @@ import type { RankSummary } from "../types/snapshot";
 
 interface RankSummariesState {
   summaries: Record<number, RankSummary>;
-  /** Max total_reserved across all loaded ranks. Bumped incrementally
-   * when a summary lands so we don't re-scan 128 ranks per flush. */
+  /** Max total_reserved across all loaded ranks. */
   maxReserved: number;
+  /** Max peak_bytes across all loaded ranks — this is what we scale
+   *  rank-selector cells against, since peak is the OOM-relevant
+   *  worst moment rather than the snapshot's end-of-window state. */
+  maxPeak: number;
   setSummary: (rank: number, s: RankSummary) => void;
   clearAll: () => void;
 }
@@ -23,11 +26,16 @@ interface RankSummariesState {
 export const useRankSummaries = create<RankSummariesState>((set) => ({
   summaries: {},
   maxReserved: 1,
-  setSummary: (rank, s) => set((state) => ({
-    summaries: { ...state.summaries, [rank]: s },
-    maxReserved: s.total_reserved > state.maxReserved ? s.total_reserved : state.maxReserved,
-  })),
-  clearAll: () => set({ summaries: {}, maxReserved: 1 }),
+  maxPeak: 1,
+  setSummary: (rank, s) => set((state) => {
+    const peak = s.peak_bytes ?? s.active_bytes;
+    return {
+      summaries: { ...state.summaries, [rank]: s },
+      maxReserved: s.total_reserved > state.maxReserved ? s.total_reserved : state.maxReserved,
+      maxPeak: peak > state.maxPeak ? peak : state.maxPeak,
+    };
+  }),
+  clearAll: () => set({ summaries: {}, maxReserved: 1, maxPeak: 1 }),
 }));
 
 export function setSummary(rank: number, s: RankSummary) {

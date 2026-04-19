@@ -162,6 +162,8 @@ function Dashboard() {
   const flame = useDataStore((s) => s.flame);
   const framePool = useDataStore((s) => s.framePool);
   const topAllocations = useDataStore((s) => s.topAllocations);
+  const xAxisMode = useDataStore((s) => s.xAxisMode);
+  const eventTimes = useDataStore((s) => s.eventTimes);
   const segments = useDataStore((s) => s.segments);
   const timeline = useDataStore((s) => s.timeline);
   const timelineBlocks = useDataStore((s) => s.timelineBlocks);
@@ -183,11 +185,19 @@ function Dashboard() {
 
   // Shared pan/zoom view range. PhaseTimeline and SegmentTimeline both
   // read/write this ref every frame — whoever pans either view, the
-  // other follows automatically with zero React re-renders.
+  // other follows automatically with zero React re-renders. Units
+  // follow xAxisMode: time = absolute μs (time-normalized in child
+  // code), event = position in eventTimes array.
   const viewRangeRef = useRef<[number, number]>([0, 1]);
   useEffect(() => {
-    if (timeline) viewRangeRef.current = [timeline.time_min, timeline.time_max];
-  }, [timeline?.time_min, timeline?.time_max]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!timeline) return;
+    if (xAxisMode === "event") {
+      const n = eventTimes ? eventTimes.length - 1 : 0;
+      viewRangeRef.current = [0, Math.max(1, n)];
+    } else {
+      viewRangeRef.current = [timeline.time_min, timeline.time_max];
+    }
+  }, [timeline?.time_min, timeline?.time_max, xAxisMode, eventTimes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Layout>
@@ -259,6 +269,8 @@ function Dashboard() {
                 width={tlWidth}
                 height={Math.min(480, 24 + 36 + segmentRows.length * 26)}
                 viewRangeRef={viewRangeRef}
+                mode={xAxisMode}
+                eventTimes={eventTimes}
               />
             </Section>
           )}

@@ -176,7 +176,20 @@ export default function PhaseTimeline({
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
   const maxBytesFull = useDataStore((s) => s.timelineMaxBytesFull);
-  const stripBuffer = useDataStore((s) => s.timelineStripBuffer);
+  const stripBufferTime = useDataStore((s) => s.timelineStripBuffer);
+  const stripBufferEvent = useDataStore((s) => s.timelineStripBufferEvent);
+  const xAxisMode = useDataStore((s) => s.xAxisMode);
+  // Active buffer for the current X-axis mode. Swapping this drives the
+  // WebGL upload + bucket index rebuild. In event mode t values in the
+  // buffer are event indices with origin 0; in time mode they're μs
+  // relative to data.time_min.
+  const stripBuffer = xAxisMode === "event" ? stripBufferEvent : stripBufferTime;
+  const timeOrigin = xAxisMode === "event" ? 0 : data.time_min;
+  const eventTimesArr = useDataStore((s) => s.eventTimes);
+  // Total X-axis range in the same units the stripBuffer uses.
+  const totalXRange = xAxisMode === "event"
+    ? (eventTimesArr ? Math.max(1, eventTimesArr.length - 1) : 1)
+    : (data.time_max - data.time_min);
   const stripCount = useDataStore((s) => s.timelineStripCount);
   const framePool = useDataStore((s) => s.framePool);
 
@@ -185,10 +198,9 @@ export default function PhaseTimeline({
   // scanning every strip every viewRange change.
   const timeBuckets = useMemo(() => {
     if (!stripBuffer) return null;
-    const totalRange = data.time_max - data.time_min;
-    if (totalRange <= 0) return null;
+    if (totalXRange <= 0) return null;
     const B = 256;
-    const bw = totalRange / B;
+    const bw = totalXRange / B;
     const bMax = new Float32Array(B);
     for (const block of blocks) {
       const sz = block.size;
@@ -207,7 +219,7 @@ export default function PhaseTimeline({
       }
     }
     return { bMax, bw, B };
-  }, [blocks, stripBuffer, data.time_min, data.time_max]);
+  }, [blocks, stripBuffer, totalXRange, xAxisMode]);
 
   // maxBytes is computed inside the rAF loop from viewRangeRef — no
   // useMemo because viewRangeRef isn't reactive. Keep a ref so hitTest
@@ -217,26 +229,38 @@ export default function PhaseTimeline({
 
   function computeMaxBytes(): number {
     const [tMin, tMax] = viewRangeRef.current;
-    if (tMin <= data.time_min && tMax >= data.time_max && maxBytesFull > 0) {
+    // Full-view fast path. In time mode we compare to [time_min, time_max];
+    // in event mode to [0, totalXRange].
+    const fullMin = xAxisMode === "event" ? 0 : data.time_min;
+    const fullMax = xAxisMode === "event" ? totalXRange : data.time_max;
+    if (tMin <= fullMin && tMax >= fullMax && maxBytesFull > 0) {
       return maxBytesFull;
     }
     if (!timeBuckets) return data.peak_bytes * 1.1;
     const { bMax, bw, B } = timeBuckets;
-    const t0 = data.time_min;
-    const bStart = Math.max(0, Math.floor((tMin - t0) / bw));
-    const bEnd = Math.min(B - 1, Math.floor((tMax - t0) / bw));
+    // Bucket boundaries share units with stripBuffer — view range
+    // must be converted to the same frame.
+    const originOff = xAxisMode === "event" ? 0 : data.time_min;
+    const bStart = Math.max(0, Math.floor((tMin - originOff) / bw));
+    const bEnd = Math.min(B - 1, Math.floor((tMax - originOff) / bw));
     let maxB = 0;
     for (let b = bStart; b <= bEnd; b++) if (bMax[b] > maxB) maxB = bMax[b];
     return (maxB || data.peak_bytes) * 1.1;
   }
 
   useEffect(() => {
-    viewRangeRef.current = [data.time_min, data.time_max];
+    // Reset view + transient selection whenever the rank OR the X-axis
+    // mode changes, since view-range units differ between modes.
+    if (xAxisMode === "event") {
+      viewRangeRef.current = [0, totalXRange];
+    } else {
+      viewRangeRef.current = [data.time_min, data.time_max];
+    }
     setSelectedBlock(null);
     setDetail(null);
     rulerRef.current = null;
     invalidate();
-  }, [data.time_min, data.time_max]);
+  }, [data.time_min, data.time_max, xAxisMode, totalXRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scale helpers: read the current ref each call, so mouse handlers
   // and hitTest always see the latest pan/zoom without needing the
@@ -270,13 +294,16 @@ export default function PhaseTimeline({
     if (!glCanvas || !stripBuffer) return;
     if (!glRef.current) glRef.current = initGL(glCanvas);
     if (!glRef.current) return;
-    const key = `${currentRank}-${stripCount}`;
+    // Include xAxisMode in the cache key — switching modes changes the
+    // *values* in stripBuffer (event indices vs μs) without changing
+    // rank or stripCount, so a rank-only key stale-GPU's the data.
+    const key = `${currentRank}-${stripCount}-${xAxisMode}`;
     if (key !== stripKeyRef.current) {
       uploadStrips(glRef.current, stripBuffer, stripCount);
       stripKeyRef.current = key;
       invalidate();
     }
-  }, [stripBuffer, stripCount, currentRank]);
+  }, [stripBuffer, stripCount, currentRank, xAxisMode]);
 
   // --- Render: WebGL strips + 2D overlay, driven by a single rAF loop ---
   //
@@ -319,7 +346,7 @@ export default function PhaseTimeline({
 
       // WebGL: draw strips (one draw call, GPU-accelerated)
       if (glRef.current) {
-        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes, data.time_min);
+        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes, timeOrigin);
       }
 
       // 2D overlay canvas: clear transparent, then fill margins opaque
@@ -373,10 +400,12 @@ export default function PhaseTimeline({
 
       const yScale = plotH / maxBytes;
 
-      // stripBuffer layout: STRIP_FLOATS floats per strip.
-      // t_start/t_end are normalized (original - data.time_min).
+      // stripBuffer layout: STRIP_FLOATS floats per strip. In time mode
+      // t values are "μs - time_min"; in event mode they're event
+      // indices. `timeOrigin` chosen at the top of this component picks
+      // the right offset for whichever buffer is active.
       const buf = stripBuffer; // may be null during the first paint before upload
-      const t0 = data.time_min;
+      const t0 = timeOrigin;
       const tMinN = tMin - t0;
       const tMaxN = tMax - t0;
 
@@ -440,8 +469,8 @@ export default function PhaseTimeline({
       let visibleCount = 0;
       if (buf && hitIndex) {
         const { packed, bw, B } = hitIndex;
-        const bStart = Math.max(0, Math.floor((tMin - data.time_min) / bw));
-        const bEnd = Math.min(B - 1, Math.floor((tMax - data.time_min) / bw));
+        const bStart = Math.max(0, Math.floor((tMin - t0) / bw));
+        const bEnd = Math.min(B - 1, Math.floor((tMax - t0) / bw));
         let total = 0;
         for (let b = bStart; b <= bEnd; b++) total += packed[b].length;
         visibleBIs = new Int32Array(total);
@@ -572,13 +601,16 @@ export default function PhaseTimeline({
         const tx = timeToX(t);
         ctx.strokeStyle = COLOR_AXIS_DIM; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(tx, MARGIN.top + plotH); ctx.lineTo(tx, MARGIN.top + plotH + 4); ctx.stroke();
-        ctx.fillText(`${((t - data.time_min) / 1e6).toFixed(2)}s`, tx, height - 14);
+        const label = xAxisMode === "event"
+          ? `#${Math.round(t).toLocaleString()}`
+          : `${((t - data.time_min) / 1e6).toFixed(2)}s`;
+        ctx.fillText(label, tx, height - 14);
       }
       // X axis label
       ctx.textAlign = "right";
       ctx.fillStyle = COLOR_AXIS_DIM;
       ctx.font = FONT_DISPLAY_SM;
-      ctx.fillText("TIME →", MARGIN.left + plotW, height - 2);
+      ctx.fillText(xAxisMode === "event" ? "EVENT →" : "TIME →", MARGIN.left + plotW, height - 2);
 
       // Peak line
       const peakY = bytesToY(data.peak_bytes);
@@ -650,8 +682,18 @@ export default function PhaseTimeline({
         ctx.beginPath(); ctx.moveTo(xL, y); ctx.lineTo(xR, y);
         ctx.moveTo(xL, y - 6); ctx.lineTo(xL, y + 6); ctx.moveTo(xR, y - 6); ctx.lineTo(xR, y + 6); ctx.stroke();
         const tL = xToTime(xL), tR = xToTime(xR), delta = Math.abs(tR - tL);
-        drawPill(ctx, formatTime(tL - data.time_min), xL, y - 16); drawPill(ctx, formatTime(tR - data.time_min), xR, y - 16);
-        drawPill(ctx, `\u0394 ${formatTime(delta)}`, (xL + xR) / 2, y + 16);
+        const fmt = xAxisMode === "event"
+          ? (v: number) => `#${Math.round(v).toLocaleString()}`
+          : (v: number) => formatTime(v - data.time_min);
+        drawPill(ctx, fmt(tL), xL, y - 16); drawPill(ctx, fmt(tR), xR, y - 16);
+        drawPill(
+          ctx,
+          xAxisMode === "event"
+            ? `\u0394 ${Math.round(delta).toLocaleString()} evt`
+            : `\u0394 ${formatTime(delta)}`,
+          (xL + xR) / 2,
+          y + 16,
+        );
       }
       ctx.restore();
     }
@@ -684,10 +726,9 @@ export default function PhaseTimeline({
   // cursor's bucket — O(N/B) vs O(N) at 20k+ blocks.
   const hitIndex = useMemo(() => {
     if (!stripBuffer) return null;
-    const totalRange = data.time_max - data.time_min;
-    if (totalRange <= 0) return null;
+    if (totalXRange <= 0) return null;
     const B = 256;
-    const bw = totalRange / B;
+    const bw = totalXRange / B;
     const lists: Set<number>[] = Array.from({ length: B }, () => new Set());
     for (let bi = 0; bi < blocks.length; bi++) {
       const block = blocks[bi];
@@ -709,7 +750,7 @@ export default function PhaseTimeline({
       return a;
     });
     return { packed, bw, B };
-  }, [blocks, stripBuffer, data.time_min, data.time_max]);
+  }, [blocks, stripBuffer, totalXRange]);
 
   const hitTest = useCallback(
     (mx: number, my: number): TimelineBlock | null => {
@@ -719,7 +760,7 @@ export default function PhaseTimeline({
       const t = xToTime(mx);
       const mouseBytes = yToBytes(my);
       if (mouseBytes < 0) return null;
-      const tN = t - data.time_min;
+      const tN = t - timeOrigin;
 
       if (hitIndex) {
         const { packed, bw, B } = hitIndex;
@@ -764,7 +805,7 @@ export default function PhaseTimeline({
       }
       return null;
     },
-    [blocks, stripBuffer, data.time_min, xToTime, yToBytes, plotW, plotH, hitIndex],
+    [blocks, stripBuffer, timeOrigin, xToTime, yToBytes, plotW, plotH, hitIndex],
   );
 
   // rAF-throttle the hover hit-test. For 20k+ blocks the per-mousemove
@@ -934,32 +975,37 @@ export default function PhaseTimeline({
       if (hasNav) {
         const [tMin, tMax] = viewRangeRef.current;
         const range = tMax - tMin;
-        const fullRange = data.time_max - data.time_min;
+        // Bounds track whichever axis mode is active.
+        const absMin = xAxisMode === "event" ? 0 : data.time_min;
+        const absMax = xAxisMode === "event" ? totalXRange : data.time_max;
+        const fullRange = absMax - absMin;
         const panRate = range * 0.02; // 2% per frame (~60fps = smooth scroll)
         const zoomRate = 0.97; // zoom in 3% per frame
+        // Minimum visible span: 100 μs in time mode, 1 event in event mode.
+        const minRange = xAxisMode === "event" ? 1 : 100;
         let newMin = tMin, newMax = tMax;
 
         if (keys.has("a") || keys.has("arrowleft")) {
-          newMin = Math.max(data.time_min, tMin - panRate);
+          newMin = Math.max(absMin, tMin - panRate);
           newMax = newMin + range;
         }
         if (keys.has("d") || keys.has("arrowright")) {
-          newMax = Math.min(data.time_max, tMax + panRate);
+          newMax = Math.min(absMax, tMax + panRate);
           newMin = newMax - range;
         }
         if (keys.has("w") || keys.has("arrowup")) {
           const nr = range * zoomRate;
-          if (nr > 100) { // minimum 100us visible range
+          if (nr > minRange) {
             const c = (newMin + newMax) / 2;
-            newMin = Math.max(data.time_min, c - nr / 2);
-            newMax = Math.min(data.time_max, newMin + nr);
+            newMin = Math.max(absMin, c - nr / 2);
+            newMax = Math.min(absMax, newMin + nr);
           }
         }
         if (keys.has("s") || keys.has("arrowdown")) {
           const nr = Math.min(fullRange, range / zoomRate);
           const c = (newMin + newMax) / 2;
-          newMin = Math.max(data.time_min, c - nr / 2);
-          newMax = Math.min(data.time_max, newMin + nr);
+          newMin = Math.max(absMin, c - nr / 2);
+          newMax = Math.min(absMax, newMin + nr);
         }
 
         if (newMin !== tMin || newMax !== tMax) {
@@ -971,7 +1017,7 @@ export default function PhaseTimeline({
     }
     navRafRef.current = requestAnimationFrame(tick);
     return () => { running = false; cancelAnimationFrame(navRafRef.current); };
-  }, [data.time_min, data.time_max]);
+  }, [data.time_min, data.time_max, xAxisMode, totalXRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -1022,7 +1068,8 @@ export default function PhaseTimeline({
           const cx2 = Math.min(MARGIN.left + plotW, Math.max(selStartRef.current.x, mx));
           const newTMin = xToTime(cx1);
           const newTMax = xToTime(cx2);
-          if (newTMax - newTMin > 100) {
+          const minSpan = xAxisMode === "event" ? 1 : 100;
+          if (newTMax - newTMin > minSpan) {
             viewRangeRef.current = [newTMin, newTMax];
             invalidate();
           }
@@ -1093,7 +1140,11 @@ export default function PhaseTimeline({
             if (rulerDragRef.current) rulerDragRef.current = null;
             invalidate();
           }}
-          onDoubleClick={() => { viewRangeRef.current = [data.time_min, data.time_max]; invalidate(); }}
+          onDoubleClick={() => {
+            if (xAxisMode === "event") viewRangeRef.current = [0, totalXRange];
+            else viewRangeRef.current = [data.time_min, data.time_max];
+            invalidate();
+          }}
         />
         {/* Hover card skeleton — content is written imperatively by
             updateHoverCard() to avoid re-rendering PhaseTimeline on

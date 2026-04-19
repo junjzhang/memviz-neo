@@ -31,12 +31,22 @@ interface DataState {
   anomalies: Anomaly[];
   framePool: FrameRecord[];
   timelineStripBuffer: Float32Array | null;
+  /** Same strips, but t-columns replaced by event indices (for "event"
+   *  X-axis mode). parseRank produces both up front. */
+  timelineStripBufferEvent: Float32Array | null;
+  /** Sorted unique event times (relative to time_min) — bridge between
+   *  time-μs and event-index axes. length = number of events. */
+  eventTimes: Float64Array | null;
   timelineStripCount: number;
   timelineMaxBytesFull: number;
   /** Per-allocator-segment rows for the SegmentTimeline view. */
   segmentRows: SegmentRow[];
   /** Call-stack pressure flamegraph for the current rank. */
   flame: FlameData | null;
+  /** X-axis unit. "time" uses absolute microseconds, "event" numbers
+   *  events 0..N-1 so dense allocation phases stretch out. */
+  xAxisMode: "time" | "event";
+  setXAxisMode: (mode: "time" | "event") => void;
   /** Loading while waiting for a requestFull. Different from file load. */
   switching: boolean;
   error: string | null;
@@ -65,6 +75,8 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     anomalies: data.anomalies,
     framePool: data.framePool,
     timelineStripBuffer: data.stripBuffer,
+    timelineStripBufferEvent: data.stripBufferEvent,
+    eventTimes: data.eventTimes,
     timelineStripCount: data.stripCount,
     timelineMaxBytesFull: data.maxBytesFull,
     segmentRows: data.segmentRows,
@@ -87,6 +99,8 @@ const emptyState: Partial<DataState> = {
   anomalies: [],
   framePool: [],
   timelineStripBuffer: null,
+  timelineStripBufferEvent: null,
+  eventTimes: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
   segmentRows: [],
@@ -111,10 +125,17 @@ export const useDataStore = create<DataState>((set, get) => ({
   anomalies: [],
   framePool: [],
   timelineStripBuffer: null,
+  timelineStripBufferEvent: null,
+  eventTimes: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
   segmentRows: [],
   flame: null,
+  // Default matches PyTorch's Active Memory Timeline: X axis counts
+  // alloc/free events, so dense training phases aren't compressed by
+  // optimizer-step idle gaps. Switch to "time" to see real μs latency.
+  xAxisMode: "event" as const,
+  setXAxisMode: (mode: "time" | "event") => set({ xAxisMode: mode }),
   switching: false,
   error: null,
   focusedAddr: null,
