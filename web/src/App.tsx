@@ -100,36 +100,81 @@ function Empty({ label = "No data" }: { label?: string }) {
   );
 }
 
-function Dashboard() {
-  const {
-    treemap,
-    topAllocations,
-    segments,
-    multiRankOverview,
-    timeline,
-    timelineBlocks,
-    anomalies,
-    currentRank,
-    error,
-    setCurrentRank,
-  } = useDataStore();
-
-  const allRanks = useFileStore((s) => s.ranks);
+/**
+ * MultiRank section re-renders every time a new rank lands during load
+ * (progressive flush updates `multiRankOverview`). Isolate it as its own
+ * subscriber so the rest of the dashboard — timeline, treemap, anomaly
+ * panel, top allocations — is untouched by those flushes.
+ */
+function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
+  const multiRankOverview = useDataStore((s) => s.multiRankOverview);
+  const currentRank = useDataStore((s) => s.currentRank);
+  const allRanksFile = useFileStore((s) => s.ranks);
   const completedCount = useFileStore((s) => s.completedCount);
   const totalCount = useFileStore((s) => s.totalCount);
   const stillLoading = completedCount < totalCount;
-
-  const [, startTransition] = useTransition();
-  const selectRank = useCallback(
-    (r: number) => startTransition(() => setCurrentRank(r)),
-    [setCurrentRank],
-  );
 
   const summariesByRank = useMemo(() => {
     const m = new Map<number, (typeof multiRankOverview)[number]>();
     for (const s of multiRankOverview) m.set(s.rank, s);
     return m;
   }, [multiRankOverview]);
+
+  const allRanks = allRanksFile.length > 0 ? allRanksFile : multiRankOverview.map((s) => s.rank);
+
+  return (
+    <Section
+      eyebrow="01"
+      title="Multi-Rank Overview"
+      meta={
+        stillLoading ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "var(--accent)",
+                animation: "fs-pulse 1.1s ease-in-out infinite",
+              }}
+            />
+            <span className="mono hl">{completedCount}</span>
+            <span className="faint">/ {totalCount} loading</span>
+          </span>
+        ) : (
+          `${allRanks.length} ranks`
+        )
+      }
+    >
+      <MultiRank
+        allRanks={allRanks}
+        summaries={summariesByRank}
+        currentRank={currentRank}
+        onSelectRank={onSelectRank}
+      />
+    </Section>
+  );
+}
+
+function Dashboard() {
+  // Stable-ish subscriptions — these only change on rank switch, not on
+  // progressive load flushes. multiRankOverview + allRanks are read
+  // inside MultiRankSection so they don't re-render the whole dashboard.
+  const treemap = useDataStore((s) => s.treemap);
+  const topAllocations = useDataStore((s) => s.topAllocations);
+  const segments = useDataStore((s) => s.segments);
+  const timeline = useDataStore((s) => s.timeline);
+  const timelineBlocks = useDataStore((s) => s.timelineBlocks);
+  const anomalies = useDataStore((s) => s.anomalies);
+  const currentRank = useDataStore((s) => s.currentRank);
+  const error = useDataStore((s) => s.error);
+  const setCurrentRank = useDataStore((s) => s.setCurrentRank);
+
+  const [, startTransition] = useTransition();
+  const selectRank = useCallback(
+    (r: number) => startTransition(() => setCurrentRank(r)),
+    [setCurrentRank],
+  );
 
   const [tlRef, tlWidth] = useContainerWidth();
   const [gridRef, gridWidth] = useContainerWidth();
@@ -155,37 +200,7 @@ function Dashboard() {
           </div>
         )}
 
-        <Section
-          eyebrow="01"
-          title="Multi-Rank Overview"
-          meta={
-            stillLoading ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                <span
-                  className="mr-spinner"
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: "var(--accent)",
-                    animation: "fs-pulse 1.1s ease-in-out infinite",
-                  }}
-                />
-                <span className="mono hl">{completedCount}</span>
-                <span className="faint">/ {totalCount} loading</span>
-              </span>
-            ) : (
-              `${allRanks.length} ranks`
-            )
-          }
-        >
-          <MultiRank
-            allRanks={allRanks.length > 0 ? allRanks : multiRankOverview.map((s) => s.rank)}
-            summaries={summariesByRank}
-            currentRank={currentRank}
-            onSelectRank={selectRank}
-          />
-        </Section>
+        <MultiRankSection onSelectRank={selectRank} />
 
         <div ref={tlRef}>
           <Section

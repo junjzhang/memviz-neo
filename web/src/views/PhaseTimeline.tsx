@@ -4,6 +4,7 @@ import type {
   TimelineBlock,
   AllocationDetail,
 } from "../types/timeline";
+import { STRIP_FLOATS } from "../types/timeline";
 import { formatBytes } from "../utils";
 import { useDataStore } from "../stores/dataStore";
 import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
@@ -146,6 +147,8 @@ export default function PhaseTimeline({
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
   const maxBytesFull = useDataStore((s) => s.timelineMaxBytesFull);
+  const stripBuffer = useDataStore((s) => s.timelineStripBuffer);
+  const stripCount = useDataStore((s) => s.timelineStripCount);
 
   const maxBytes = useMemo(() => {
     const [tMin, tMax] = viewRange;
@@ -153,16 +156,26 @@ export default function PhaseTimeline({
     if (tMin <= data.time_min && tMax >= data.time_max && maxBytesFull > 0) {
       return maxBytesFull;
     }
+    if (!stripBuffer) return data.peak_bytes * 1.1;
+    const t0 = data.time_min;
+    const tMinN = tMin - t0;
+    const tMaxN = tMax - t0;
     let maxB = 0;
     for (const block of blocks) {
-      for (const strip of block.strips) {
-        if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
-        const top = strip.y_offset + block.size;
+      const off0 = block.stripOffset;
+      const count = block.stripCount;
+      const sz = block.size;
+      for (let si = 0; si < count; si++) {
+        const off = (off0 + si) * STRIP_FLOATS;
+        const ts = stripBuffer[off];
+        const te = stripBuffer[off + 1];
+        if (te <= tMinN || ts >= tMaxN) continue;
+        const top = stripBuffer[off + 2] + sz;
         if (top > maxB) maxB = top;
       }
     }
     return (maxB || data.peak_bytes) * 1.1;
-  }, [viewRange, blocks, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
+  }, [viewRange, blocks, stripBuffer, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
 
   useEffect(() => {
     setViewRange([data.time_min, data.time_max]);
@@ -189,8 +202,6 @@ export default function PhaseTimeline({
   );
 
   // --- WebGL strip upload (zero-copy from pre-packed buffer) ---
-  const stripBuffer = useDataStore((s) => s.timelineStripBuffer);
-  const stripCount = useDataStore((s) => s.timelineStripCount);
   useEffect(() => {
     const glCanvas = glCanvasRef.current;
     if (!glCanvas || !stripBuffer) return;
@@ -234,58 +245,91 @@ export default function PhaseTimeline({
 
       const yScale = plotH / maxBytes;
 
+      // stripBuffer layout: STRIP_FLOATS floats per strip.
+      // t_start/t_end are normalized (original - data.time_min).
+      const buf = stripBuffer; // may be null during the first paint before upload
+      const t0 = data.time_min;
+      const tMinN = tMin - t0;
+      const tMaxN = tMax - t0;
+
       // Selection highlight
-      if (selectedBlock) {
+      if (selectedBlock && buf) {
         ctx.strokeStyle = COLOR_ACCENT;
         ctx.lineWidth = 2;
-        for (const strip of selectedBlock.strips) {
-          if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
-          const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
-          const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
+        const off0 = selectedBlock.stripOffset;
+        const count = selectedBlock.stripCount;
+        for (let si = 0; si < count; si++) {
+          const off = (off0 + si) * STRIP_FLOATS;
+          const ts = buf[off], te = buf[off + 1];
+          if (te <= tMinN || ts >= tMaxN) continue;
+          const yo = buf[off + 2];
+          const x1 = Math.max(timeToX(ts + t0), MARGIN.left);
+          const x2 = Math.min(timeToX(te + t0), MARGIN.left + plotW);
           if (x2 - x1 < 0.3) continue;
-          const y1 = bytesToY(strip.y_offset + selectedBlock.size);
-          const y2 = bytesToY(strip.y_offset);
+          const y1 = bytesToY(yo + selectedBlock.size);
+          const y2 = bytesToY(yo);
           ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
         }
       }
 
-      // Block labels
-      ctx.globalAlpha = 0.92;
-      ctx.font = FONT_MONO_SM;
-      for (const block of blocks) {
-        let bestX1 = 0, bestY1 = 0, bestW = 0, bestH = 0;
-        for (const strip of block.strips) {
-          if (strip.t_end <= tMin || strip.t_start >= tMax) continue;
-          const x1 = Math.max(timeToX(strip.t_start), MARGIN.left);
-          const sw = Math.min(timeToX(strip.t_end), MARGIN.left + plotW) - x1;
-          if (sw > bestW) {
-            bestW = sw; bestX1 = x1;
-            bestY1 = bytesToY(strip.y_offset + block.size);
-            bestH = bytesToY(strip.y_offset) - bestY1;
+      // Block labels — find each block's widest visible strip as anchor.
+      if (buf) {
+        ctx.globalAlpha = 0.92;
+        ctx.font = FONT_MONO_SM;
+        for (const block of blocks) {
+          let bestX1 = 0, bestY1 = 0, bestW = 0, bestH = 0;
+          const off0 = block.stripOffset;
+          const count = block.stripCount;
+          for (let si = 0; si < count; si++) {
+            const off = (off0 + si) * STRIP_FLOATS;
+            const ts = buf[off], te = buf[off + 1];
+            if (te <= tMinN || ts >= tMaxN) continue;
+            const yo = buf[off + 2];
+            const x1 = Math.max(timeToX(ts + t0), MARGIN.left);
+            const sw = Math.min(timeToX(te + t0), MARGIN.left + plotW) - x1;
+            if (sw > bestW) {
+              bestW = sw; bestX1 = x1;
+              bestY1 = bytesToY(yo + block.size);
+              bestH = bytesToY(yo) - bestY1;
+            }
+          }
+          if (bestW < 100 || bestH < 14) continue;
+          const label = block.top_frame || `0x${block.addr.toString(16)}`;
+          const maxChars = Math.floor(bestW / 6.5);
+          const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
+          ctx.fillStyle = "rgba(250,250,250,0.95)";
+          ctx.fillText(text, bestX1 + 4, bestY1 + 12);
+          if (bestH > 26) {
+            ctx.fillStyle = "rgba(250,250,250,0.55)";
+            ctx.fillText(formatBytes(block.size), bestX1 + 4, bestY1 + 24);
           }
         }
-        if (bestW < 100 || bestH < 14) continue;
-        const label = block.top_frame || `0x${block.addr.toString(16)}`;
-        const maxChars = Math.floor(bestW / 6.5);
-        const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
-        ctx.fillStyle = "rgba(250,250,250,0.95)";
-        ctx.fillText(text, bestX1 + 4, bestY1 + 12);
-        if (bestH > 26) { ctx.fillStyle = "rgba(250,250,250,0.55)"; ctx.fillText(formatBytes(block.size), bestX1 + 4, bestY1 + 24); }
-      }
-      ctx.globalAlpha = 1;
+        ctx.globalAlpha = 1;
 
-      // Pending-free red overlay
-      for (const block of blocks) {
-        if (block.free_requested_us <= 0) continue;
-        if (block.size * yScale < 0.5) continue;
-        ctx.fillStyle = "rgba(248,113,113,0.38)";
-        for (const strip of block.strips) {
-          const os = Math.max(strip.t_start, block.free_requested_us);
-          if (os >= strip.t_end || strip.t_end <= tMin || os >= tMax) continue;
-          const x1 = Math.max(timeToX(os), MARGIN.left);
-          const x2 = Math.min(timeToX(strip.t_end), MARGIN.left + plotW);
-          if (x2 - x1 < 0.5) continue;
-          ctx.fillRect(x1, bytesToY(strip.y_offset + block.size), x2 - x1, bytesToY(strip.y_offset) - bytesToY(strip.y_offset + block.size));
+        // Pending-free red overlay
+        for (const block of blocks) {
+          if (block.free_requested_us <= 0) continue;
+          if (block.size * yScale < 0.5) continue;
+          const frqN = block.free_requested_us - t0;
+          ctx.fillStyle = "rgba(248,113,113,0.38)";
+          const off0 = block.stripOffset;
+          const count = block.stripCount;
+          for (let si = 0; si < count; si++) {
+            const off = (off0 + si) * STRIP_FLOATS;
+            const ts = buf[off], te = buf[off + 1];
+            const os = Math.max(ts, frqN);
+            if (os >= te || te <= tMinN || os >= tMaxN) continue;
+            const yo = buf[off + 2];
+            const x1 = Math.max(timeToX(os + t0), MARGIN.left);
+            const x2 = Math.min(timeToX(te + t0), MARGIN.left + plotW);
+            if (x2 - x1 < 0.5) continue;
+            ctx.fillRect(
+              x1,
+              bytesToY(yo + block.size),
+              x2 - x1,
+              bytesToY(yo) - bytesToY(yo + block.size),
+            );
+          }
         }
       }
 
@@ -426,21 +470,30 @@ export default function PhaseTimeline({
       ctx.strokeStyle = COLOR_ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
       ctx.strokeRect(sx1, sy1, sw, sh); ctx.setLineDash([]);
     }
-  }, [data, blocks, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
+  }, [data, blocks, stripBuffer, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
 
   // hit test
   const hitTest = useCallback(
     (mx: number, my: number): TimelineBlock | null => {
       if (mx < MARGIN.left || mx > MARGIN.left + plotW) return null;
       if (my < MARGIN.top || my > MARGIN.top + plotH) return null;
+      if (!stripBuffer) return null;
       const t = xToTime(mx);
       const mouseBytes = yToBytes(my);
       if (mouseBytes < 0) return null;
+      const tN = t - data.time_min;
       for (let bi = blocks.length - 1; bi >= 0; bi--) {
         const block = blocks[bi];
-        for (const strip of block.strips) {
-          if (t < strip.t_start || t >= strip.t_end) continue;
-          if (mouseBytes >= strip.y_offset && mouseBytes < strip.y_offset + block.size) {
+        const off0 = block.stripOffset;
+        const count = block.stripCount;
+        const sz = block.size;
+        for (let si = 0; si < count; si++) {
+          const off = (off0 + si) * STRIP_FLOATS;
+          const ts = stripBuffer[off];
+          const te = stripBuffer[off + 1];
+          if (tN < ts || tN >= te) continue;
+          const yo = stripBuffer[off + 2];
+          if (mouseBytes >= yo && mouseBytes < yo + sz) {
             return block;
           }
           break;
@@ -448,7 +501,7 @@ export default function PhaseTimeline({
       }
       return null;
     },
-    [blocks, xToTime, yToBytes, plotW, plotH],
+    [blocks, stripBuffer, data.time_min, xToTime, yToBytes, plotW, plotH],
   );
 
   const handleMouseMove = useCallback(

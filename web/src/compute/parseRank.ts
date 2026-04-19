@@ -3,6 +3,8 @@
 // detection, or Float32 strip packing. No DOM / WebGL imports allowed here.
 
 import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../types/snapshot";
+import type { TimelineBlock } from "../types/timeline";
+import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
 import type { Allocation, RankData, AllocationLite } from "./index";
@@ -118,38 +120,59 @@ export function parseRank(json: string, _rank: number): ParseResult {
   };
   topAllocations.sort((a, b) => b.size - a.size);
 
-  // Pre-pack strip buffer for WebGL. Subtract time_min first: real PyTorch
-  // traces use absolute Unix timestamps (~1.77e15), which collapse to
-  // zero-width quads when stored as Float32 without normalization.
-  const blocks = raw.blocks as {
+  // Pre-pack strip buffer for WebGL + record per-block [offset, count]
+  // so the main thread can locate each block's strips in the buffer
+  // without cloning a strips: Strip[] array across the boundary.
+  //
+  // Subtract time_min first: real PyTorch traces use absolute Unix
+  // timestamps (~1.77e15), which collapse to zero-width quads when
+  // stored as Float32 without normalization.
+  const rawBlocks = raw.blocks as (TimelineBlock & {
     strips: { t_start: number; t_end: number; y_offset: number }[];
-    size: number;
-    idx: number;
-  }[];
+  })[];
   const timeOrigin: number = raw.timeline.time_min;
   let stripCount = 0;
   let maxBytesFull = 0;
-  for (const b of blocks) {
+  for (const b of rawBlocks) {
     stripCount += b.strips.length;
     for (const s of b.strips) {
       const t = s.y_offset + b.size;
       if (t > maxBytesFull) maxBytesFull = t;
     }
   }
-  const stripBuffer = new Float32Array(stripCount * 7);
-  let off = 0;
-  for (const block of blocks) {
+  const stripBuffer = new Float32Array(stripCount * STRIP_FLOATS);
+  const timelineBlocks: TimelineBlock[] = new Array(rawBlocks.length);
+  let stripIdx = 0;
+  for (let bi = 0; bi < rawBlocks.length; bi++) {
+    const block = rawBlocks[bi];
     const [r, g, bl] = STRIP_PALETTE_RGB[block.idx % STRIP_PALETTE_RGB.length];
     const sz = block.size;
+    const startStripIdx = stripIdx;
     for (const strip of block.strips) {
-      stripBuffer[off++] = strip.t_start - timeOrigin;
-      stripBuffer[off++] = strip.t_end - timeOrigin;
-      stripBuffer[off++] = strip.y_offset;
-      stripBuffer[off++] = sz;
-      stripBuffer[off++] = r;
-      stripBuffer[off++] = g;
-      stripBuffer[off++] = bl;
+      const off = stripIdx * STRIP_FLOATS;
+      stripBuffer[off] = strip.t_start - timeOrigin;
+      stripBuffer[off + 1] = strip.t_end - timeOrigin;
+      stripBuffer[off + 2] = strip.y_offset;
+      stripBuffer[off + 3] = sz;
+      stripBuffer[off + 4] = r;
+      stripBuffer[off + 5] = g;
+      stripBuffer[off + 6] = bl;
+      stripIdx++;
     }
+    // Emit a strips-free TimelineBlock — the heavy strips array never
+    // leaves the worker.
+    timelineBlocks[bi] = {
+      addr: block.addr,
+      size: block.size,
+      alloc_us: block.alloc_us,
+      free_requested_us: block.free_requested_us,
+      free_us: block.free_us,
+      alive: block.alive,
+      top_frame: block.top_frame,
+      idx: block.idx,
+      stripOffset: startStripIdx,
+      stripCount: block.strips.length,
+    };
   }
 
   // Discard the big `allocations` array before returning — detectAnomalies
@@ -169,7 +192,7 @@ export function parseRank(json: string, _rank: number): ParseResult {
       peak_bytes: raw.timeline.peak_bytes,
       allocation_count: raw.timeline.allocation_count,
     },
-    timelineBlocks: raw.blocks,
+    timelineBlocks,
     anomalies,
     stripBuffer,
     stripCount,
