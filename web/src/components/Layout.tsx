@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
-import type { RankSummary } from "../types/snapshot";
 
 export default function Layout({ children }: { children: ReactNode }) {
   const currentRank = useDataStore((s) => s.currentRank);
@@ -48,13 +47,39 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
 
         {/* Active / Inactive / Allocated / Util were moved to the
-            Multi-Rank hero card — don't duplicate here. Header only
-            holds identifying state (rank) and one-per-dataset config
-            (allocator settings). */}
-        {summary && (summary.alloc_conf !== undefined ||
-          summary.expandable_segments !== undefined) && (
+            Multi-Rank hero card — don't duplicate here. Header holds
+            identifying state (rank) and one-per-dataset config
+            (allocator settings) flat so users can scan them at a
+            glance. */}
+        {summary && summary.alloc_conf !== undefined && (
           <div className="app-header-stats">
-            <SettingsBadge summary={summary} />
+            <AllocStat
+              label="Expandable"
+              value={summary.expandable_segments ? "on" : "off"}
+              accent={summary.expandable_segments === true}
+            />
+            <div className="divider-v" />
+            <AllocStat
+              label="Max Split"
+              value={
+                summary.max_split_size !== undefined && summary.max_split_size >= 0
+                  ? `${summary.max_split_size} MB`
+                  : "unlimited"
+              }
+              dim={summary.max_split_size === undefined || summary.max_split_size < 0}
+            />
+            <div className="divider-v" />
+            <AllocStat
+              label="GC Threshold"
+              value={
+                summary.gc_threshold && summary.gc_threshold > 0
+                  ? summary.gc_threshold.toFixed(2)
+                  : "off"
+              }
+              dim={!summary.gc_threshold || summary.gc_threshold <= 0}
+            />
+            <div className="divider-v" />
+            <AllocConfStat value={summary.alloc_conf || ""} />
           </div>
         )}
       </header>
@@ -141,92 +166,49 @@ export default function Layout({ children }: { children: ReactNode }) {
         .hs-value.hl { color: var(--accent); }
         .hs-sub { font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); margin-left: 4px; }
 
-        .settings-badge {
-          position: relative;
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 6px 10px;
-          border: 1px solid var(--border);
-          font-family: var(--font-mono);
-          font-size: 11px;
-          color: var(--fg-muted);
-          cursor: help;
-          letter-spacing: 0.04em;
-        }
-        .settings-badge:hover { color: var(--fg); border-color: var(--border-strong); }
-        .settings-badge:hover .settings-popup { display: block; }
-        .settings-popup {
-          display: none;
-          position: absolute;
-          right: 0;
-          top: calc(100% + 6px);
-          min-width: 380px;
-          max-width: 560px;
-          padding: 12px 14px;
-          background: rgba(10,10,11,0.98);
-          border: 1px solid var(--border-strong);
-          box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-          z-index: 20;
-          white-space: normal;
-          text-align: left;
-        }
-        .settings-popup-row { margin-bottom: 10px; }
-        .settings-popup-row:last-child { margin-bottom: 0; }
-        .settings-popup-label {
-          font-family: var(--font-display);
-          font-size: 9px;
-          letter-spacing: 0.14em;
-          text-transform: uppercase;
-          color: var(--fg-faint);
-          margin-bottom: 4px;
-        }
-        .settings-popup-value {
-          font-family: var(--font-mono);
-          font-size: 11px;
-          color: var(--fg);
-          word-break: break-all;
-          line-height: 1.5;
-        }
       `}</style>
     </div>
   );
 }
 
-function SettingsBadge({ summary }: { summary: RankSummary }) {
-  const conf = summary.alloc_conf || "";
-  const exp = summary.expandable_segments === true;
-  const mss = summary.max_split_size ?? -1;
-  const gc = summary.gc_threshold ?? 0;
-  // Compact inline label: show the most impactful setting.
-  const inline = exp ? "expandable" : conf ? "custom" : "default";
+function AllocStat({
+  label,
+  value,
+  accent,
+  dim,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+  dim?: boolean;
+}) {
   return (
-    <div className="settings-badge" title="Hover for PyTorch allocator settings">
-      <span>⚙</span>
-      <span style={{ opacity: 0.7 }}>{inline}</span>
-      <div className="settings-popup">
-        <div className="settings-popup-row">
-          <div className="settings-popup-label">PYTORCH_CUDA_ALLOC_CONF</div>
-          <div className="settings-popup-value">
-            {conf || <span style={{ color: "var(--fg-faint)" }}>(unset)</span>}
-          </div>
-        </div>
-        <div className="settings-popup-row">
-          <div className="settings-popup-label">Expandable Segments</div>
-          <div className="settings-popup-value">{exp ? "on" : "off"}</div>
-        </div>
-        <div className="settings-popup-row">
-          <div className="settings-popup-label">max_split_size</div>
-          <div className="settings-popup-value">
-            {mss < 0 ? <span style={{ color: "var(--fg-faint)" }}>unlimited</span> : `${mss} MB`}
-          </div>
-        </div>
-        <div className="settings-popup-row">
-          <div className="settings-popup-label">garbage_collection_threshold</div>
-          <div className="settings-popup-value">
-            {gc > 0 ? gc.toFixed(2) : <span style={{ color: "var(--fg-faint)" }}>disabled</span>}
-          </div>
-        </div>
+    <div className="hs-item">
+      <div className="hs-label">{label}</div>
+      <div
+        className={"hs-value" + (accent ? " hl" : "")}
+        style={dim ? { color: "var(--fg-faint)" } : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function AllocConfStat({ value }: { value: string }) {
+  const display = value || "(unset)";
+  // Truncate long PYTORCH_CUDA_ALLOC_CONF strings; full text available
+  // via native tooltip.
+  const MAX = 40;
+  const shown = display.length > MAX ? display.slice(0, MAX - 1) + "…" : display;
+  return (
+    <div className="hs-item" title={display}>
+      <div className="hs-label">ALLOC_CONF</div>
+      <div
+        className="hs-value"
+        style={{ fontSize: 12, color: value ? "var(--fg)" : "var(--fg-faint)" }}
+      >
+        {shown}
       </div>
     </div>
   );

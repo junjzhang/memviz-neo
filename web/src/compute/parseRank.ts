@@ -283,10 +283,11 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
   const timelineBlocks: TimelineBlock[] = new Array(topAllocsIR.length);
-  // Strips are laid out above the pre-trace baseline, but we rebase to y=0 so
-  // the baseline doesn't eat chart vertical space. The baseline value is still
-  // surfaced as an axis annotation.
-  let maxBytesFull = 0;
+  // Polygon layout produces y offsets relative to "zero active memory";
+  // we shift them up by `baseline` (pre-window allocations still alive)
+  // so the final y axis maps to absolute GPU memory bytes. maxBytesFull
+  // therefore starts at `baseline` and grows as strips pile on top.
+  let maxBytesFull = baseline;
   let writeIdx = 0;
   // Per-hueKey instance counter so repeated allocs from the same call
   // site get lightness-shifted shades in the same color family.
@@ -337,12 +338,17 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
       const off = writeIdx * STRIP_FLOATS;
       stripBuffer[off] = tStart - timeMin;
       stripBuffer[off + 1] = tEnd - timeMin;
-      stripBuffer[off + 2] = yOff;
+      // Shift all in-window strips up by the pre-window baseline so the
+      // Y axis reflects absolute memory bytes. The [0..baseline] band
+      // at the bottom represents long-lived pre-window allocations that
+      // never freed inside the snapshot window — drawn as a grey
+      // "baseline floor" in the renderer.
+      stripBuffer[off + 2] = yOff + baseline;
       stripBuffer[off + 3] = sz;
       stripBuffer[off + 4] = r;
       stripBuffer[off + 5] = g;
       stripBuffer[off + 6] = bl;
-      const top = yOff + sz;
+      const top = yOff + baseline + sz;
       if (top > maxBytesFull) maxBytesFull = top;
       writeIdx++;
     }

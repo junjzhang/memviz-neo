@@ -68,7 +68,13 @@ interface CellProps {
 const Cell = memo(function Cell({ rank, isSelected, maxReserved, onSelect, onHover }: CellProps) {
   const summary = useRankSummaries((s) => s.summaries[rank]);
   const loaded = summary !== undefined;
-  const activeH = loaded ? (summary.active_bytes / maxReserved) * CELL_MAX_H : 0;
+  // active_bytes includes pre-window allocations; split them visually so
+  // "what we can actually attribute" (windowActive) and "what was already
+  // there when tracing started" (baseline) show as distinct layers.
+  const baseline = loaded ? Math.min(summary.baseline ?? 0, summary.active_bytes) : 0;
+  const windowActiveBytes = loaded ? Math.max(0, summary.active_bytes - baseline) : 0;
+  const baselineH = loaded ? (baseline / maxReserved) * CELL_MAX_H : 0;
+  const windowActiveH = loaded ? (windowActiveBytes / maxReserved) * CELL_MAX_H : 0;
   const inactiveH = loaded ? (summary.inactive_bytes / maxReserved) * CELL_MAX_H : 0;
 
   const handleClick = useCallback(() => onSelect(rank), [onSelect, rank]);
@@ -94,7 +100,10 @@ const Cell = memo(function Cell({ rank, isSelected, maxReserved, onSelect, onHov
     >
       {loaded ? (
         <>
-          <span className="mr-cell-active" style={{ height: `${activeH}px` }} />
+          {/* Order is reverse because .mr-cell uses column-reverse:
+              bottom → top = baseline, window-active, inactive. */}
+          <span className="mr-cell-baseline" style={{ height: `${baselineH}px` }} />
+          <span className="mr-cell-active" style={{ height: `${windowActiveH}px` }} />
           <span className="mr-cell-inactive" style={{ height: `${inactiveH}px` }} />
         </>
       ) : (
@@ -127,6 +136,11 @@ function HoverTooltip({ rank, x }: { rank: number; x: number }) {
           <div className="faint" style={{ fontSize: 10 }}>
             {((summary.total_allocated / summary.total_reserved) * 100).toFixed(1)}% util
           </div>
+          {summary.baseline != null && summary.baseline > 0 && (
+            <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>
+              pre-window · {formatBytes(summary.baseline)}
+            </div>
+          )}
         </>
       ) : (
         <div className="faint" style={{ marginTop: 2 }}>loading…</div>
@@ -136,7 +150,10 @@ function HoverTooltip({ rank, x }: { rank: number; x: number }) {
 }
 
 function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: number }) {
-  const activePct = (rank.active_bytes / maxReserved) * 100;
+  const baseline = Math.min(rank.baseline ?? 0, rank.active_bytes);
+  const windowActive = Math.max(0, rank.active_bytes - baseline);
+  const baselinePct = (baseline / maxReserved) * 100;
+  const windowActivePct = (windowActive / maxReserved) * 100;
   const inactivePct = (rank.inactive_bytes / maxReserved) * 100;
   const utilPct =
     rank.total_reserved > 0
@@ -149,7 +166,14 @@ function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: numbe
 
       <div className="mr-hero-bar-wrap">
         <div className="mr-hero-bar">
-          <div className="mr-hero-bar-active" style={{ width: `${activePct}%` }} />
+          {baselinePct > 0 && (
+            <div
+              className="mr-hero-bar-baseline"
+              style={{ width: `${baselinePct}%` }}
+              title={`pre-window baseline · ${formatBytes(baseline)}`}
+            />
+          )}
+          <div className="mr-hero-bar-active" style={{ width: `${windowActivePct}%` }} />
           <div className="mr-hero-bar-inactive" style={{ width: `${inactivePct}%` }} />
         </div>
         <div className="mr-hero-bar-caption">
@@ -159,7 +183,7 @@ function HeroCard({ rank, maxReserved }: { rank: RankSummary; maxReserved: numbe
       </div>
 
       <Stat label="Active" value={formatBytes(rank.active_bytes)} />
-      <Stat label="Inactive" value={formatBytes(rank.inactive_bytes)} />
+      <Stat label="Baseline" value={formatBytes(baseline)} />
       <Stat label="Allocated" value={formatBytes(rank.total_allocated)} accent />
       <Stat label="Reserved" value={formatBytes(rank.total_reserved)} />
     </div>
@@ -241,6 +265,15 @@ const STYLES = `
   }
   .mr-hero-bar-active { background: var(--accent); height: 100%; }
   .mr-hero-bar-inactive { background: var(--border-strong); height: 100%; }
+  .mr-hero-bar-baseline {
+    height: 100%;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        rgba(113,113,122,0.9) 0 2px,
+        rgba(63,63,70,0.9) 2px 5px
+      );
+  }
   .mr-hero-bar-caption {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -280,6 +313,23 @@ const STYLES = `
     transition: background 120ms var(--ease);
   }
   .mr-cell-inactive { display: block; background: var(--border); }
+  .mr-cell-baseline {
+    display: block;
+    background:
+      repeating-linear-gradient(
+        45deg,
+        rgba(113,113,122,0.55) 0 2px,
+        rgba(63,63,70,0.75) 2px 5px
+      );
+  }
+  .mr-cell.is-selected .mr-cell-baseline {
+    background:
+      repeating-linear-gradient(
+        45deg,
+        rgba(217,249,157,0.45) 0 2px,
+        rgba(113,113,122,0.65) 2px 5px
+      );
+  }
   .mr-cell-pending {
     display: block;
     flex: 1;

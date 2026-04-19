@@ -7,6 +7,10 @@ export interface RankSummary {
   block_count: number;
   active_bytes: number;
   inactive_bytes: number;
+  /** Bytes alive before the snapshot's event window began — these are
+   *  real allocations we can't attribute to any in-window call stack.
+   *  Already included in active_bytes / total_allocated. */
+  baseline?: number;
   /** Raw PYTORCH_CUDA_ALLOC_CONF env var string, e.g.
    *  "expandable_segments:True". Empty if the snapshot didn't record it. */
   alloc_conf?: string;
