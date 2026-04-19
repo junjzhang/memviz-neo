@@ -32,6 +32,26 @@ function loadSavedWorkerCount(): number {
   return Math.min(HW_CONC, 8);
 }
 
+// layout_limit passed to WASM parse_intern. 0 = keep all allocations.
+// Small values (3k) drop mid-sized transient allocations and flatten
+// the optimizer-step saw-tooth pattern; 20k usually covers full FSDP
+// iterations; 0 is exact at the cost of more strips.
+const LAYOUT_LIMIT_KEY = "memviz.layoutLimit";
+export const LAYOUT_LIMIT_OPTIONS: { value: number; label: string }[] = [
+  { value: 3000, label: "3k" },
+  { value: 10000, label: "10k" },
+  { value: 20000, label: "20k" },
+  { value: 0, label: "all" },
+];
+
+function loadSavedLayoutLimit(): number {
+  if (typeof localStorage === "undefined") return 20000;
+  const raw = localStorage.getItem(LAYOUT_LIMIT_KEY);
+  const n = raw != null ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n >= 0) return n;
+  return 20000;
+}
+
 interface FileState {
   status: "idle" | "loading" | "ready" | "error";
   fileNames: string[];
@@ -43,12 +63,14 @@ interface FileState {
   inFlightRanks: number[];
   poolSize: number;
   workerCount: number;
+  layoutLimit: number;
   error: string | null;
   ranks: number[];
 
   openDirectory: () => Promise<void>;
   openFiles: (files: FileList) => Promise<void>;
   setWorkerCount: (n: number) => void;
+  setLayoutLimit: (n: number) => void;
   reset: () => void;
 }
 
@@ -68,6 +90,7 @@ export const useFileStore = create<FileState>((set) => ({
   inFlightRanks: [],
   poolSize: 0,
   workerCount: loadSavedWorkerCount(),
+  layoutLimit: loadSavedLayoutLimit(),
   error: null,
   ranks: [],
 
@@ -101,6 +124,14 @@ export const useFileStore = create<FileState>((set) => ({
       try { localStorage.setItem(WORKER_COUNT_KEY, String(clamped)); } catch { /* ignore */ }
     }
     set({ workerCount: clamped });
+  },
+
+  setLayoutLimit: (n: number) => {
+    const v = Math.max(0, Math.floor(n));
+    if (typeof localStorage !== "undefined") {
+      try { localStorage.setItem(LAYOUT_LIMIT_KEY, String(v)); } catch { /* ignore */ }
+    }
+    set({ layoutLimit: v });
   },
 
   reset: () => {
@@ -200,7 +231,8 @@ async function loadAllParallel(
   );
   activePool = pool;
 
-  await pool.processAll(tasks);
+  const layoutLimit = useFileStore.getState().layoutLimit;
+  await pool.processAll(tasks, { layoutLimit });
 
   if (!firstDone) {
     set({ status: "error", error: "All ranks failed to parse", progress: 1 });

@@ -151,32 +151,49 @@ export default function PhaseTimeline({
   const stripCount = useDataStore((s) => s.timelineStripCount);
   const framePool = useDataStore((s) => s.framePool);
 
+  // Pre-bucketed max-y by time. Built once per rank so pan/zoom can
+  // compute window-max in O(B) bucket reads (~256) instead of
+  // scanning every strip every viewRange change.
+  const timeBuckets = useMemo(() => {
+    if (!stripBuffer) return null;
+    const totalRange = data.time_max - data.time_min;
+    if (totalRange <= 0) return null;
+    const B = 256;
+    const bw = totalRange / B;
+    const bMax = new Float32Array(B);
+    for (const block of blocks) {
+      const sz = block.size;
+      const off0 = block.stripOffset;
+      const count = block.stripCount;
+      for (let si = 0; si < count; si++) {
+        const off = (off0 + si) * STRIP_FLOATS;
+        const ts = stripBuffer[off];       // already normalized vs time_min
+        const te = stripBuffer[off + 1];
+        const top = stripBuffer[off + 2] + sz;
+        const bStart = Math.max(0, Math.floor(ts / bw));
+        const bEnd = Math.min(B - 1, Math.floor((te - 1) / bw));
+        for (let b = bStart; b <= bEnd; b++) {
+          if (top > bMax[b]) bMax[b] = top;
+        }
+      }
+    }
+    return { bMax, bw, B };
+  }, [blocks, stripBuffer, data.time_min, data.time_max]);
+
   const maxBytes = useMemo(() => {
     const [tMin, tMax] = viewRange;
-    // Fast path: full view — use pre-computed per-rank max, skip 30k iterations
     if (tMin <= data.time_min && tMax >= data.time_max && maxBytesFull > 0) {
       return maxBytesFull;
     }
-    if (!stripBuffer) return data.peak_bytes * 1.1;
+    if (!timeBuckets) return data.peak_bytes * 1.1;
+    const { bMax, bw, B } = timeBuckets;
     const t0 = data.time_min;
-    const tMinN = tMin - t0;
-    const tMaxN = tMax - t0;
+    const bStart = Math.max(0, Math.floor((tMin - t0) / bw));
+    const bEnd = Math.min(B - 1, Math.floor((tMax - t0) / bw));
     let maxB = 0;
-    for (const block of blocks) {
-      const off0 = block.stripOffset;
-      const count = block.stripCount;
-      const sz = block.size;
-      for (let si = 0; si < count; si++) {
-        const off = (off0 + si) * STRIP_FLOATS;
-        const ts = stripBuffer[off];
-        const te = stripBuffer[off + 1];
-        if (te <= tMinN || ts >= tMaxN) continue;
-        const top = stripBuffer[off + 2] + sz;
-        if (top > maxB) maxB = top;
-      }
-    }
+    for (let b = bStart; b <= bEnd; b++) if (bMax[b] > maxB) maxB = bMax[b];
     return (maxB || data.peak_bytes) * 1.1;
-  }, [viewRange, blocks, stripBuffer, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
+  }, [viewRange, timeBuckets, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
 
   useEffect(() => {
     setViewRange([data.time_min, data.time_max]);
@@ -243,6 +260,34 @@ export default function PhaseTimeline({
       ctx.fillRect(0, MARGIN.top + plotH, width, height - MARGIN.top - plotH);
       ctx.fillRect(0, MARGIN.top, MARGIN.left, plotH);
       ctx.fillRect(MARGIN.left + plotW, MARGIN.top, MARGIN.right, plotH);
+
+      // Pre-trace baseline band — bytes alive before the ring buffer's
+      // window that never freed in it. No per-alloc detail, so draw as
+      // an aggregate stripe from y=0 up to y=baseline.
+      if (data.baseline > 0) {
+        const yBase = bytesToY(data.baseline);
+        const yBottom = MARGIN.top + plotH;
+        if (yBase < yBottom) {
+          ctx.fillStyle = "rgba(120,120,135,0.18)";
+          ctx.fillRect(MARGIN.left, yBase, plotW, yBottom - yBase);
+          ctx.strokeStyle = "rgba(160,160,175,0.35)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(MARGIN.left, yBase);
+          ctx.lineTo(MARGIN.left + plotW, yBase);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(200,200,210,0.65)";
+          ctx.font = FONT_MONO_SM;
+          ctx.textAlign = "left";
+          ctx.fillText(
+            `pre-trace baseline · ${formatBytes(data.baseline)}`,
+            MARGIN.left + 6,
+            yBase - 5,
+          );
+        }
+      }
 
       const yScale = plotH / maxBytes;
 
@@ -473,7 +518,38 @@ export default function PhaseTimeline({
     }
   }, [data, blocks, stripBuffer, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
 
-  // hit test
+  // Bucketed hit index: each time bucket lists the block indices whose
+  // strips intersect that bucket. hitTest only scans candidates for the
+  // cursor's bucket — O(N/B) vs O(N) at 20k+ blocks.
+  const hitIndex = useMemo(() => {
+    if (!stripBuffer) return null;
+    const totalRange = data.time_max - data.time_min;
+    if (totalRange <= 0) return null;
+    const B = 256;
+    const bw = totalRange / B;
+    const lists: Set<number>[] = Array.from({ length: B }, () => new Set());
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const block = blocks[bi];
+      const off0 = block.stripOffset;
+      const count = block.stripCount;
+      for (let si = 0; si < count; si++) {
+        const off = (off0 + si) * STRIP_FLOATS;
+        const ts = stripBuffer[off];
+        const te = stripBuffer[off + 1];
+        const bStart = Math.max(0, Math.floor(ts / bw));
+        const bEnd = Math.min(B - 1, Math.floor((te - 1) / bw));
+        for (let b = bStart; b <= bEnd; b++) lists[b].add(bi);
+      }
+    }
+    const packed = lists.map((s) => {
+      const a = new Int32Array(s.size);
+      let i = 0;
+      for (const v of s) a[i++] = v;
+      return a;
+    });
+    return { packed, bw, B };
+  }, [blocks, stripBuffer, data.time_min, data.time_max]);
+
   const hitTest = useCallback(
     (mx: number, my: number): TimelineBlock | null => {
       if (mx < MARGIN.left || mx > MARGIN.left + plotW) return null;
@@ -483,6 +559,33 @@ export default function PhaseTimeline({
       const mouseBytes = yToBytes(my);
       if (mouseBytes < 0) return null;
       const tN = t - data.time_min;
+
+      if (hitIndex) {
+        const { packed, bw, B } = hitIndex;
+        const bIdx = Math.min(B - 1, Math.max(0, Math.floor(tN / bw)));
+        const cand = packed[bIdx];
+        // Scan newest-first so later allocations win on overlap (matches
+        // the previous full-scan's visual layering).
+        for (let k = cand.length - 1; k >= 0; k--) {
+          const bi = cand[k];
+          const block = blocks[bi];
+          const off0 = block.stripOffset;
+          const count = block.stripCount;
+          const sz = block.size;
+          for (let si = 0; si < count; si++) {
+            const off = (off0 + si) * STRIP_FLOATS;
+            const ts = stripBuffer[off];
+            const te = stripBuffer[off + 1];
+            if (tN < ts || tN >= te) continue;
+            const yo = stripBuffer[off + 2];
+            if (mouseBytes >= yo && mouseBytes < yo + sz) return block;
+            break;
+          }
+        }
+        return null;
+      }
+
+      // Fallback (no stripBuffer): full scan.
       for (let bi = blocks.length - 1; bi >= 0; bi--) {
         const block = blocks[bi];
         const off0 = block.stripOffset;
@@ -494,16 +597,46 @@ export default function PhaseTimeline({
           const te = stripBuffer[off + 1];
           if (tN < ts || tN >= te) continue;
           const yo = stripBuffer[off + 2];
-          if (mouseBytes >= yo && mouseBytes < yo + sz) {
-            return block;
-          }
+          if (mouseBytes >= yo && mouseBytes < yo + sz) return block;
           break;
         }
       }
       return null;
     },
-    [blocks, stripBuffer, data.time_min, xToTime, yToBytes, plotW, plotH],
+    [blocks, stripBuffer, data.time_min, xToTime, yToBytes, plotW, plotH, hitIndex],
   );
+
+  // rAF-throttle the hover hit-test. For 20k+ blocks the per-mousemove
+  // scan would otherwise eat 5-10ms each at 60+Hz, dropping frames on
+  // the canvas redraw that hoverBlock itself triggers.
+  const hoverRafRef = useRef<number | null>(null);
+  const hoverPendingRef = useRef<{ mx: number; my: number } | null>(null);
+
+  const runHoverDetection = useCallback(() => {
+    hoverRafRef.current = null;
+    const pos = hoverPendingRef.current;
+    hoverPendingRef.current = null;
+    if (!pos) return;
+    const { mx, my } = pos;
+    // Flag hit (top margin area) takes precedence over block hover.
+    if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
+      const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
+      for (let ai = 0; ai < flagLimit; ai++) {
+        const anomaly = anomalies[ai];
+        const fx = timeToX(anomaly.alloc_us);
+        if (Math.abs(mx - fx) < FLAG_SIZE) {
+          setHoverAnomaly({ anomaly, x: mx, y: my });
+          setHoverBlock(null);
+          setHoverPos(null);
+          return;
+        }
+      }
+    }
+    setHoverAnomaly(null);
+    const hit = hitTest(mx, my);
+    setHoverBlock(hit);
+    setHoverPos(hit ? { x: mx, y: my } : null);
+  }, [anomalies, timeToX, hitTest]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
@@ -511,7 +644,7 @@ export default function PhaseTimeline({
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
 
-      // Ruler dragging — clamp to plot area
+      // Ruler dragging — clamp to plot area, update immediately.
       if (rulerDragRef.current) {
         const { type, startPx } = rulerDragRef.current;
         const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
@@ -521,7 +654,7 @@ export default function PhaseTimeline({
         return;
       }
 
-      // Selection rectangle dragging
+      // Selection rectangle dragging — immediate.
       if (selStartRef.current) {
         const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
         const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
@@ -529,27 +662,14 @@ export default function PhaseTimeline({
         return;
       }
 
-      // Check flag hit (top margin area) — only visible flags
-      if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
-        const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
-        for (let ai = 0; ai < flagLimit; ai++) {
-          const anomaly = anomalies[ai];
-          const fx = timeToX(anomaly.alloc_us);
-          if (Math.abs(mx - fx) < FLAG_SIZE) {
-            setHoverAnomaly({ anomaly, x: mx, y: my });
-            setHoverBlock(null);
-            setHoverPos(null);
-            return;
-          }
-        }
+      // Non-drag hover — coalesce to rAF so fast mouse motion doesn't
+      // trigger N hitTests per frame.
+      hoverPendingRef.current = { mx, my };
+      if (hoverRafRef.current === null) {
+        hoverRafRef.current = requestAnimationFrame(runHoverDetection);
       }
-      setHoverAnomaly(null);
-
-      const hit = hitTest(mx, my);
-      setHoverBlock(hit);
-      setHoverPos(hit ? { x: mx, y: my } : null);
     },
-    [hitTest, data, plotW, plotH, anomalies, timeToX],
+    [plotW, plotH, runHoverDetection],
   );
 
 
@@ -746,6 +866,11 @@ export default function PhaseTimeline({
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
           onMouseLeave={() => {
+            if (hoverRafRef.current !== null) {
+              cancelAnimationFrame(hoverRafRef.current);
+              hoverRafRef.current = null;
+            }
+            hoverPendingRef.current = null;
             setHoverBlock(null);
             setHoverPos(null);
             setHoverAnomaly(null);

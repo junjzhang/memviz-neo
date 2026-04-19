@@ -1,9 +1,14 @@
 /**
  * Layout worker (pool, N workers). Accepts IR JSON from the parse
- * worker and runs polygon layout + treemap + anomaly detection + strip
- * packing. The full RankData stays in this worker's local Map; only a
- * small summary is posted back during load. Main thread requests the
- * full data on demand (rank switch).
+ * worker and produces the summary for the main thread during load.
+ * The IR string itself is what the worker holds on to, not the fully
+ * decoded RankData — at layout_limit=20k+ each RankData costs ~50 MB
+ * JS heap and 128 ranks of that pushes the worker above 6 GB.
+ *
+ * When main requests a full rank, we re-run parseRank from the cached
+ * IR (~200-500ms at 20k) and structured-clone the result back. Users
+ * switch ranks a few times, not constantly, so paying layout cost per
+ * switch is the right trade.
  *
  * Main → Worker: { type: "layout", rank, ir }
  * Worker → Main: { type: "summary", rank, summary, layoutMs, irBytes }
@@ -16,27 +21,29 @@
  */
 
 import { parseRank } from "./parseRank";
-import type { RankData } from "./index";
 
-const fullData = new Map<number, RankData>();
+const irStore = new Map<number, string>();
 
 self.onmessage = (e: MessageEvent) => {
   const { type } = e.data;
 
   if (type === "layout") {
-    const { rank, ir } = e.data;
+    const { rank, ir } = e.data as { rank: number; ir: string };
     try {
+      // Parse the summary out of the IR without running the full
+      // polygon layout / treemap / strip packing. Summary is a tiny
+      // slice of the IR JSON and is all main needs during load.
       const t0 = performance.now();
-      const { data } = parseRank(ir, rank);
+      const raw = JSON.parse(ir);
+      const summary = raw.summary;
       const layoutMs = performance.now() - t0;
-      fullData.set(rank, data);
-      // Summary is plain + tiny; structured clone cost is negligible.
+      irStore.set(rank, ir);
       (self as any).postMessage({
         type: "summary",
         rank,
-        summary: data.summary,
+        summary,
         layoutMs,
-        irBytes: (ir as string).length,
+        irBytes: ir.length,
       });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });
@@ -46,15 +53,17 @@ self.onmessage = (e: MessageEvent) => {
 
   if (type === "requestFull") {
     const { rank, requestId } = e.data;
-    const data = fullData.get(rank);
-    if (!data) {
+    const ir = irStore.get(rank);
+    if (!ir) {
       (self as any).postMessage({ type: "fullMiss", rank, requestId });
       return;
     }
-    // Don't transfer — transfer is one-shot and we want to serve future
-    // requests for this same rank. structuredClone (default postMessage)
-    // copies typed arrays; ~5-20ms for a couple MB on main thread.
-    (self as any).postMessage({ type: "full", rank, requestId, data });
+    try {
+      const { data } = parseRank(ir, rank);
+      (self as any).postMessage({ type: "full", rank, requestId, data });
+    } catch (err: any) {
+      (self as any).postMessage({ type: "error", rank, error: String(err) });
+    }
     return;
   }
 };

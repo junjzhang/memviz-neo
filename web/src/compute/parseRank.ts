@@ -165,6 +165,10 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const topAllocsIR: TopAllocIR[] = raw.top_allocations || [];
   const timeMin: number = raw.timeline.time_min;
   const timeMax: number = raw.timeline.time_max;
+  // Pre-window allocations not freed in window — aggregated, not
+  // per-allocation. Drawn as an opaque band at the bottom so the y axis
+  // reflects real memory usage instead of "delta from window start".
+  const baseline: number = raw.timeline.baseline || 0;
 
   // ---- Anomaly detection over the top-N (same cohort the UI surfaces) ----
   const allocations: Allocation[] = topAllocsIR.map((a) => ({
@@ -279,7 +283,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
   const timelineBlocks: TimelineBlock[] = new Array(topAllocsIR.length);
-  let maxBytesFull = 0;
+  let maxBytesFull = baseline;
   let writeIdx = 0;
   for (let i = 0; i < topAllocsIR.length; i++) {
     const a = topAllocsIR[i];
@@ -289,7 +293,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     for (const s of stripsPerAlloc[i]) {
       const tStart = stripsFlat[s * 4 + 1];
       const tEnd = stripsFlat[s * 4 + 2];
-      const yOff = stripsFlat[s * 4 + 3];
+      const yOff = stripsFlat[s * 4 + 3] + baseline;
       const off = writeIdx * STRIP_FLOATS;
       stripBuffer[off] = tStart - timeMin;
       stripBuffer[off + 1] = tEnd - timeMin;
@@ -330,6 +334,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
       time_max: raw.timeline.time_max,
       peak_bytes: raw.timeline.peak_bytes,
       allocation_count: raw.timeline.allocation_count,
+      baseline,
     },
     timelineBlocks,
     anomalies,

@@ -49,7 +49,7 @@ export interface ProgressSnapshot {
 }
 
 export interface WorkerPool {
-  processAll: (tasks: WorkerTask[]) => Promise<void>;
+  processAll: (tasks: WorkerTask[], opts?: { layoutLimit?: number }) => Promise<void>;
   requestFull: (rank: number) => Promise<RankData>;
   terminate: () => void;
 }
@@ -103,8 +103,9 @@ export function createWorkerPool(
     (window as any).__memvizStats = stats;
   }
 
-  async function processAll(tasks: WorkerTask[]) {
+  async function processAll(tasks: WorkerTask[], opts?: { layoutLimit?: number }) {
     if (terminated || tasks.length === 0) return;
+    const layoutLimit = opts?.layoutLimit ?? 3000;
 
     const total = tasks.length;
     const parseBusyRank: number[] = new Array(K).fill(-1);
@@ -191,7 +192,7 @@ export function createWorkerPool(
           startedAt.set(task.rank, performance.now());
           scheduleProgress(snap(completed, "parsing"));
           task.getBuffer().then((buffer) => {
-            worker.postMessage({ type: "parse", rank: task.rank, buffer }, [buffer]);
+            worker.postMessage({ type: "parse", rank: task.rank, buffer, layoutLimit }, [buffer]);
           }).catch((err) => {
             onError(task.rank, `File read failed: ${err}`);
             parseBusyRank[wIdx] = -1;

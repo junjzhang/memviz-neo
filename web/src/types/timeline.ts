@@ -5,6 +5,12 @@ export interface TimelineData {
   time_max: number;
   peak_bytes: number;
   allocation_count: number;
+  /**
+   * Bytes alive before the trace window began but not freed inside it —
+   * pre-window persistent memory (weights, optimizer state) that we can
+   * only represent as an aggregate. Rendered as a band from y=0 upward.
+   */
+  baseline: number;
 }
 
 export interface TimelineAnnotation {

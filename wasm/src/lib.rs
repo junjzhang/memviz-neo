@@ -206,17 +206,49 @@ fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
 }
 
 // ---- Alloc/free pairing ----
+//
+// PyTorch's `device_traces` is a ring buffer of the last ~50k events.
+// When training outlives the buffer, the window starts mid-run: some
+// frees reference allocations made before the window ("orphan frees"),
+// and some allocations persisted from before the window are still live
+// at snapshot time. Both groups form a baseline that must be modeled,
+// otherwise the timeline shape matches neither the true memory usage
+// nor PyTorch's own _memory_viz output.
+//
+// Reconstruction:
+//   L_end   = sum of active_allocated blocks in segments at snapshot
+//   running = sum(alloc sizes) - sum(all free sizes) observed in window
+//   L_start = L_end - running        (bytes alive when window began)
+//   peak    = L_start + max(running) (true peak over the window)
+//
+// Orphan frees are synthesized as allocations with alloc_us = t_min so
+// they appear in the timeline as rectangles that shrink as they get
+// freed. What remains of L_start (pre-window allocs that never freed in
+// the window) we emit as `baseline_invisible` — an aggregate y-offset
+// the renderer draws as a band so the y axis matches reality.
 
 fn build_allocations(
     traces: &[(String, i64, i64, i64, i64, u32)],
+    segments_active_allocated: i64,
     pools: &Pools,
-) -> (Vec<Allocation>, i64, i64, i64) {
-    if traces.is_empty() { return (vec![], 0, 0, 0); }
+) -> (Vec<Allocation>, i64, i64, i64, i64) {
+    if traces.is_empty() { return (vec![], 0, 0, 0, 0); }
     struct P { raw_addr: i64, size: i64, time_us: i64, free_req: i64, stack_idx: u32 }
     let mut pending: HashMap<i64, P> = HashMap::new();
     let mut allocs = Vec::new();
-    let mut total: i64 = 0;
-    let mut peak: i64 = 0;
+
+    // Net delta from window start. Goes negative if pre-window allocs
+    // get freed faster than in-window allocs happen. max_running is the
+    // largest excursion above the starting baseline.
+    let mut running: i64 = 0;
+    let mut max_running: i64 = 0;
+
+    // (raw_addr, size, free_us, stack_idx) for orphan frees we'll later
+    // materialize as pre-window allocations.
+    let mut orphans: Vec<(i64, i64, i64, u32)> = Vec::new();
+
+    let t_min = traces.first().unwrap().3;
+    let t_max = traces.last().unwrap().3;
 
     for (action, device_addr, size, time_us, raw_addr, stack_idx) in traces {
         match action.as_str() {
@@ -225,7 +257,8 @@ fn build_allocations(
                     raw_addr: *raw_addr, size: *size, time_us: *time_us,
                     free_req: -1, stack_idx: *stack_idx,
                 });
-                total += size; if total > peak { peak = total; }
+                running += size;
+                if running > max_running { max_running = running; }
             }
             "free_requested" => { if let Some(p) = pending.get_mut(device_addr) { p.free_req = *time_us; } }
             "free_completed" => {
@@ -236,14 +269,25 @@ fn build_allocations(
                         free_requested_us: p.free_req, free_us: *time_us,
                         top_frame_idx: top, stack_idx: p.stack_idx,
                     });
-                    total -= p.size;
+                    running -= p.size;
+                } else {
+                    orphans.push((*raw_addr, *size, *time_us, *stack_idx));
+                    running -= size;
                 }
             }
             _ => {}
         }
     }
-    let t_min = traces.first().unwrap().3;
-    let t_max = traces.last().unwrap().3;
+
+    let orphan_total: i64 = orphans.iter().map(|o| o.1).sum();
+    for (raw_addr, size, free_us, stack_idx) in orphans {
+        let top = resolve_top_frame_from_stack(stack_idx, pools);
+        allocs.push(Allocation {
+            addr: raw_addr, size, alloc_us: t_min, free_requested_us: -1,
+            free_us, top_frame_idx: top, stack_idx,
+        });
+    }
+
     for (_key, p) in pending.drain() {
         let top = resolve_top_frame_from_stack(p.stack_idx, pools);
         allocs.push(Allocation {
@@ -251,7 +295,14 @@ fn build_allocations(
             free_us: -1, top_frame_idx: top, stack_idx: p.stack_idx,
         });
     }
-    (allocs, t_min, t_max, peak)
+
+    let baseline_total = (segments_active_allocated - running).max(0);
+    // What the orphan rectangles can't represent — persistent pre-window
+    // allocations still alive at snapshot. Drawn as an aggregate band.
+    let baseline_invisible = (baseline_total - orphan_total).max(0);
+    let peak = baseline_total + max_running;
+
+    (allocs, t_min, t_max, peak, baseline_invisible)
 }
 
 // ---- JSON output helpers ----
@@ -286,17 +337,28 @@ fn emit_frame_idx(buf: &mut String, idx: u32) {
 pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let mut pools = Pools::new();
     let (segments, traces) = parse_snapshot(data, &mut pools);
-    let (allocs, t_min, t_max, peak) = build_allocations(&traces, &pools);
+
+    let seg_active: i64 = segments.iter()
+        .flat_map(|s| s.blocks.iter())
+        .filter(|b| b.state == "active_allocated")
+        .map(|b| b.size)
+        .sum();
+
+    let (allocs, t_min, t_max, peak, baseline) =
+        build_allocations(&traces, seg_active, &pools);
 
     // Pick top-N by size. Tie-break on alloc_us then addr to keep output
     // deterministic when multiple allocations share a size.
+    // layout_limit <= 0 means keep all.
     let mut top_idx: Vec<usize> = (0..allocs.len()).collect();
     top_idx.sort_by(|&a, &b| {
         allocs[b].size.cmp(&allocs[a].size)
             .then_with(|| allocs[a].alloc_us.cmp(&allocs[b].alloc_us))
             .then_with(|| allocs[a].addr.cmp(&allocs[b].addr))
     });
-    top_idx.truncate(layout_limit as usize);
+    if layout_limit > 0 {
+        top_idx.truncate(layout_limit as usize);
+    }
 
     let mut j = String::with_capacity(2 * 1024 * 1024);
     j.push('{');
@@ -308,7 +370,7 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
         for b in &s.blocks { bc += 1; if b.state == "active_allocated" { ab += b.size; } else if b.state == "inactive" { ib += b.size; } }
     }
     j.push_str(&format!("\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib}}},"));
-    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"allocation_count\":{}}},", allocs.len()));
+    j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", allocs.len()));
 
     // Interned frame pool: [[name, filename, line], ...]
     j.push_str("\"frame_pool\":[");

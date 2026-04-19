@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "react";
-import { useFileStore, WORKER_COUNT_MAX } from "../stores/fileStore";
+import { useFileStore, WORKER_COUNT_MAX, LAYOUT_LIMIT_OPTIONS } from "../stores/fileStore";
 
 const hasDirectoryPicker = typeof window !== "undefined" && "showDirectoryPicker" in window;
 
@@ -12,8 +12,12 @@ const PHASE_LABEL: Record<string, string> = {
 };
 
 export default function FileSelector() {
-  const { status, phase, inFlightRanks, poolSize, error, openDirectory, openFiles, workerCount, setWorkerCount } =
-    useFileStore();
+  const {
+    status, phase, inFlightRanks, poolSize, error,
+    openDirectory, openFiles,
+    workerCount, setWorkerCount,
+    layoutLimit, setLayoutLimit,
+  } = useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Pill values: 1, 2, 4, 8, detected max — deduped and capped.
@@ -56,6 +60,25 @@ export default function FileSelector() {
           </div>
           <span className="fs-config-hint mono faint">
             detected {WORKER_COUNT_MAX} core{WORKER_COUNT_MAX === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        <div className="fs-config">
+          <span className="fs-config-k">Detail</span>
+          <div className="fs-pills">
+            {LAYOUT_LIMIT_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                className={"fs-pill mono" + (layoutLimit === opt.value ? " is-active" : "")}
+                onClick={() => setLayoutLimit(opt.value)}
+                aria-pressed={layoutLimit === opt.value}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <span className="fs-config-hint mono faint">
+            top-N allocations kept per rank
           </span>
         </div>
 
