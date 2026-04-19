@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useTransition } from "react";
+import { useCallback, useEffect } from "react";
 import { ConfigProvider, theme } from "antd";
 import Layout from "./components/Layout";
 import FileSelector from "./components/FileSelector";
@@ -14,15 +14,17 @@ import { useContainerWidth } from "./hooks/useContainerWidth";
 
 export default function App() {
   const fileStatus = useFileStore((s) => s.status);
-  const fileRankCount = useFileStore((s) => s.rankData.size);
-  const loadFromFiles = useDataStore((s) => s.loadFromFiles);
+  const firstRank = useFileStore((s) => s.ranks[0]);
+  const setCurrentRank = useDataStore((s) => s.setCurrentRank);
+  const hasCurrentRank = useDataStore((s) => s.summary !== null);
 
-  // Push data to dataStore only when rank count changes (not every flush)
+  // On the first rank arrival, fetch full data for it. Later rank arrivals
+  // during the load are summary-only and don't touch dataStore.
   useEffect(() => {
-    if (fileStatus === "ready" && fileRankCount > 0) {
-      loadFromFiles(useFileStore.getState().rankData);
+    if (fileStatus === "ready" && firstRank !== undefined && !hasCurrentRank) {
+      void setCurrentRank(firstRank);
     }
-  }, [fileStatus, fileRankCount, loadFromFiles]);
+  }, [fileStatus, firstRank, hasCurrentRank, setCurrentRank]);
 
   return (
     <ConfigProvider
@@ -107,20 +109,11 @@ function Empty({ label = "No data" }: { label?: string }) {
  * panel, top allocations — is untouched by those flushes.
  */
 function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
-  const multiRankOverview = useDataStore((s) => s.multiRankOverview);
   const currentRank = useDataStore((s) => s.currentRank);
-  const allRanksFile = useFileStore((s) => s.ranks);
+  const allRanks = useFileStore((s) => s.ranks);
   const completedCount = useFileStore((s) => s.completedCount);
   const totalCount = useFileStore((s) => s.totalCount);
   const stillLoading = completedCount < totalCount;
-
-  const summariesByRank = useMemo(() => {
-    const m = new Map<number, (typeof multiRankOverview)[number]>();
-    for (const s of multiRankOverview) m.set(s.rank, s);
-    return m;
-  }, [multiRankOverview]);
-
-  const allRanks = allRanksFile.length > 0 ? allRanksFile : multiRankOverview.map((s) => s.rank);
 
   return (
     <Section
@@ -148,7 +141,6 @@ function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void 
     >
       <MultiRank
         allRanks={allRanks}
-        summaries={summariesByRank}
         currentRank={currentRank}
         onSelectRank={onSelectRank}
       />
@@ -170,9 +162,8 @@ function Dashboard() {
   const error = useDataStore((s) => s.error);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
 
-  const [, startTransition] = useTransition();
   const selectRank = useCallback(
-    (r: number) => startTransition(() => setCurrentRank(r)),
+    (r: number) => { void setCurrentRank(r); },
     [setCurrentRank],
   );
 

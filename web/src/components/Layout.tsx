@@ -4,8 +4,10 @@ import { useFileStore } from "../stores/fileStore";
 import { formatBytes } from "../utils";
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { currentRank, summary, loading } = useDataStore();
-  const hasData = useDataStore((s) => s.ranks.length > 0);
+  const currentRank = useDataStore((s) => s.currentRank);
+  const summary = useDataStore((s) => s.summary);
+  const loading = useFileStore((s) => s.status === "loading" && s.progress === 0);
+  const hasData = useFileStore((s) => s.ranks.length > 0);
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
   const handleReset = () => {

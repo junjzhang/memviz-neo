@@ -1,23 +1,27 @@
 import { create } from "zustand";
-import type { RankData } from "../compute";
 import {
   createWorkerPool,
   type WorkerPool,
-  type WorkerResult,
   type WorkerTask,
   type LoadPhase,
   type ProgressSnapshot,
+  type RankSummary as WorkerRankSummary,
 } from "../compute/workerPool";
+import { setSummary as cacheSetSummary, clearSummaries } from "./rankStore";
 
 type FileReader = () => Promise<ArrayBuffer>;
 
 // Active pool lives until the next dataset is loaded or reset is called.
-// Kept around so opening another directory reuses the compiled WASM module.
+// Kept around so rank-switch requestFull() can talk to the worker that
+// holds the target rank's data.
 let activePool: WorkerPool | null = null;
+
+export function getActivePool(): WorkerPool | null {
+  return activePool;
+}
 
 const WORKER_COUNT_KEY = "memviz.workerCount";
 const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
-/** Max pill value shown in the picker — clamped to a sane range. */
 export const WORKER_COUNT_MAX = Math.max(4, Math.min(HW_CONC, 16));
 
 function loadSavedWorkerCount(): number {
@@ -36,15 +40,11 @@ interface FileState {
   completedCount: number;
   inFlightCount: number;
   totalCount: number;
-  /** Rank numbers currently being parsed (one per active worker). */
   inFlightRanks: number[];
-  /** Size of the worker pool (constant within a load). */
   poolSize: number;
-  /** User-chosen worker count for the next load. Persisted in localStorage. */
   workerCount: number;
   error: string | null;
   ranks: number[];
-  rankData: Map<number, RankData>;
 
   openDirectory: () => Promise<void>;
   openFiles: (files: FileList) => Promise<void>;
@@ -58,7 +58,6 @@ function extractRank(filename: string): number {
 }
 
 export const useFileStore = create<FileState>((set) => ({
-
   status: "idle",
   fileNames: [],
   progress: 0,
@@ -71,7 +70,6 @@ export const useFileStore = create<FileState>((set) => ({
   workerCount: loadSavedWorkerCount(),
   error: null,
   ranks: [],
-  rankData: new Map(),
 
   openDirectory: async () => {
     try {
@@ -110,6 +108,7 @@ export const useFileStore = create<FileState>((set) => ({
       activePool.terminate();
       activePool = null;
     }
+    clearSummaries();
     set({
       status: "idle",
       fileNames: [],
@@ -122,10 +121,23 @@ export const useFileStore = create<FileState>((set) => ({
       poolSize: 0,
       error: null,
       ranks: [],
-      rankData: new Map(),
     });
   },
 }));
+
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as any).__memvizLoadUrls = async (urls: string[]) => {
+    const entries = await Promise.all(
+      urls.map(async (url) => {
+        const name = url.split("/").pop() || url;
+        const buf = await (await fetch(url)).arrayBuffer();
+        return { name, reader: async () => buf };
+      }),
+    );
+    const set = (partial: Partial<FileState>) => useFileStore.setState(partial);
+    await loadAllParallel(entries, set);
+  };
+}
 
 async function loadAllParallel(
   entries: { name: string; reader: FileReader }[],
@@ -135,6 +147,7 @@ async function loadAllParallel(
   if (entries.length === 0) { set({ status: "error", error: "No .pickle files found" }); return; }
 
   const ranks = entries.map((e) => extractRank(e.name)).sort((a, b) => a - b);
+  clearSummaries();
   set({
     status: "loading",
     fileNames: entries.map((e) => e.name),
@@ -154,37 +167,20 @@ async function loadAllParallel(
     getBuffer: e.reader,
   }));
 
-  const rankData = new Map<number, RankData>();
   let firstDone = false;
 
-  // Throttle rank flushes: collect a burst of completions and emit one
-  // React commit per ~50ms instead of one per rank. Progress still ticks
-  // smoothly via the onProgress callback; only the heavy rankData update
-  // is batched. 32 ranks that finish over ~5s → ~8-10 commits instead of 32.
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-  const FLUSH_DEBOUNCE_MS = 150;
-  const scheduleFlush = () => {
-    if (!firstDone) {
-      // Emit the first rank synchronously so the dashboard paints asap.
-      firstDone = true;
-      set({ status: "ready", rankData: new Map(rankData) });
-      return;
-    }
-    if (flushTimer !== null) return;
-    flushTimer = setTimeout(() => {
-      flushTimer = null;
-      set({ rankData: new Map(rankData) });
-    }, FLUSH_DEBOUNCE_MS);
-  };
-
-  // Terminate any previous pool before starting a new load.
   if (activePool) activePool.terminate();
 
   const desiredWorkers = useFileStore.getState().workerCount;
   const pool = createWorkerPool(
-    (result: WorkerResult) => {
-      rankData.set(result.rank, result.data);
-      scheduleFlush();
+    (rank: number, summary: WorkerRankSummary) => {
+      // Summary-only push during load: ~64 bytes per rank. Cheap
+      // structured clone, cheap selector comparisons on main.
+      cacheSetSummary(rank, summary);
+      if (!firstDone) {
+        firstDone = true;
+        set({ status: "ready" });
+      }
     },
     (rank, error) => {
       console.error(`[memviz] rank ${rank} failed:`, error);
@@ -205,12 +201,10 @@ async function loadAllParallel(
   activePool = pool;
 
   await pool.processAll(tasks);
-  // Keep the pool alive — workers still hold per-rank framesCache for
-  // on-demand getDetail lookups. Terminated on reset() only.
 
-  if (rankData.size === 0) {
+  if (!firstDone) {
     set({ status: "error", error: "All ranks failed to parse", progress: 1 });
   } else {
-    set({ status: "ready", rankData: new Map(rankData), progress: 1 });
+    set({ progress: 1 });
   }
 }

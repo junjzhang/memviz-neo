@@ -12,34 +12,37 @@ import type {
   AllocationDetail,
 } from "../types/timeline";
 import type { RankData, Anomaly } from "../compute";
+import { getActivePool } from "./fileStore";
+
+// Main-thread "current rank" store. We hold the full RankData only for
+// the currently-selected rank (plus a small LRU for recently-visited
+// ones). Everything else lives in its owning layout worker. Rank
+// switching triggers workerPool.requestFull(rank) which structured-
+// clones the RankData back to main. ~20-50ms per switch.
 
 interface DataState {
-  ranks: number[];
   currentRank: number;
   summary: RankSummary | null;
   treemap: TreemapNode | null;
   segments: SegmentInfo[];
   topAllocations: TopAllocation[];
-  multiRankOverview: RankSummary[];
   timeline: TimelineData | null;
   timelineBlocks: TimelineBlock[];
   anomalies: Anomaly[];
-  /** Interned frame pool for the current rank. UI looks up top_frame_idx into this. */
   framePool: FrameRecord[];
-  // Pre-packed WebGL strip data — zero-copy on rank switch
   timelineStripBuffer: Float32Array | null;
   timelineStripCount: number;
   timelineMaxBytesFull: number;
-  loading: boolean;
+  /** Loading while waiting for a requestFull. Different from file load. */
+  switching: boolean;
   error: string | null;
   focusedAddr: number | null;
   focusRange: [number, number] | null;
 
-  _rankCache: Map<number, RankData>;
+  /** Underlying RankData for the current rank (needed for getDetail). */
+  _currentData: RankData | null;
 
-  setCurrentRank: (rank: number) => void;
-  loadFromFiles: (rankData: Map<number, RankData>) => void;
-  /** Resolve a block's detail synchronously via framePool / stackPool. */
+  setCurrentRank: (rank: number) => Promise<void>;
   getDetail: (rank: number, addr: number) => AllocationDetail | null;
   focusAnomaly: (anomaly: Anomaly) => void;
   clearFocus: () => void;
@@ -62,18 +65,17 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     timelineMaxBytesFull: data.maxBytesFull,
     focusedAddr: null,
     focusRange: null,
-    loading: false,
+    switching: false,
+    _currentData: data,
   };
 }
 
-export const useDataStore = create<DataState>((set, get) => ({
-  ranks: [],
+const emptyState: Partial<DataState> = {
   currentRank: 0,
   summary: null,
   treemap: null,
   segments: [],
   topAllocations: [],
-  multiRankOverview: [],
   timeline: null,
   timelineBlocks: [],
   anomalies: [],
@@ -81,52 +83,66 @@ export const useDataStore = create<DataState>((set, get) => ({
   timelineStripBuffer: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
-  loading: false,
+  switching: false,
+  focusedAddr: null,
+  focusRange: null,
+  _currentData: null,
+};
+
+// De-dupe concurrent setCurrentRank calls for the same rank.
+let inflight: { rank: number; promise: Promise<void> } | null = null;
+
+export const useDataStore = create<DataState>((set, get) => ({
+  currentRank: 0,
+  summary: null,
+  treemap: null,
+  segments: [],
+  topAllocations: [],
+  timeline: null,
+  timelineBlocks: [],
+  anomalies: [],
+  framePool: [],
+  timelineStripBuffer: null,
+  timelineStripCount: 0,
+  timelineMaxBytesFull: 0,
+  switching: false,
   error: null,
   focusedAddr: null,
   focusRange: null,
-  _rankCache: new Map(),
+  _currentData: null,
 
-  setCurrentRank: (rank: number) => {
-    const data = get()._rankCache.get(rank);
-    if (!data) return;
-    set(applyRankData(data, rank));
-  },
+  setCurrentRank: async (rank: number) => {
+    const current = get();
+    if (current.currentRank === rank && current._currentData !== null) return;
+    if (inflight && inflight.rank === rank) return inflight.promise;
 
-  loadFromFiles: (rankData: Map<number, RankData>) => {
-    const state = get();
-    const parsedRanks = [...rankData.keys()].sort((a, b) => a - b);
+    const pool = getActivePool();
+    if (!pool) return;
 
-    const isNewDataset =
-      !state.summary ||
-      state._rankCache !== rankData && !state._rankCache.has(parsedRanks[0]) ||
-      !rankData.has(state.currentRank);
+    set({ switching: true, currentRank: rank });
 
-    if (isNewDataset) {
-      const first = parsedRanks[0];
-      const data = rankData.get(first)!;
-      set({
-        ranks: parsedRanks,
-        multiRankOverview: parsedRanks.map((r) => rankData.get(r)!.summary),
-        _rankCache: rankData,
-        error: null,
-        ...applyRankData(data, first),
-      });
-    } else {
-      const needsOverview = parsedRanks.length !== state.ranks.length;
-      set({
-        ranks: parsedRanks,
-        ...(needsOverview ? { multiRankOverview: parsedRanks.map((r) => rankData.get(r)!.summary) } : {}),
-        _rankCache: rankData,
-      });
-    }
+    const promise = (async () => {
+      try {
+        const data = await pool.requestFull(rank);
+        set(applyRankData(data, rank));
+      } catch (err: any) {
+        set({ switching: false, error: String(err) });
+      } finally {
+        if (inflight && inflight.rank === rank) inflight = null;
+      }
+    })();
+
+    inflight = { rank, promise };
+    return promise;
   },
 
   getDetail: (rank: number, addr: number): AllocationDetail | null => {
-    // Resolve synchronously via the interned pools already on the main
-    // thread — no worker round-trip, no async wait.
-    const rd = get()._rankCache.get(rank);
-    if (!rd) return null;
+    // Detail resolution uses the currently-loaded rank's data. If user
+    // requests detail for a rank that isn't current, they'd have had to
+    // be viewing it (we only call getDetail from hover/click on the
+    // active rank's timeline / treemap).
+    const rd = get()._currentData;
+    if (!rd || rd.summary.rank !== rank) return null;
     const entry = rd.stackByAddr.get(addr);
     if (!entry) return null;
     const stack = rd.stackPool[entry.stack_idx];
@@ -169,23 +185,8 @@ export const useDataStore = create<DataState>((set, get) => ({
 
   clearFocus: () => set({ focusedAddr: null, focusRange: null }),
 
-  resetData: () => set({
-    ranks: [],
-    currentRank: 0,
-    summary: null,
-    treemap: null,
-    segments: [],
-    topAllocations: [],
-    multiRankOverview: [],
-    timeline: null,
-    timelineBlocks: [],
-    anomalies: [],
-    framePool: [],
-    timelineStripBuffer: null,
-    timelineStripCount: 0,
-    timelineMaxBytesFull: 0,
-    focusedAddr: null,
-    focusRange: null,
-    _rankCache: new Map(),
-  }),
+  resetData: () => {
+    inflight = null;
+    set({ ...emptyState, error: null });
+  },
 }));

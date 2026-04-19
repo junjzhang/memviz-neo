@@ -1,22 +1,16 @@
 /**
  * Two-stage worker pool.
  *
- * Stage 1 — parse: K workers, each runs WASM parse_intern (pickle decode
- *   + frame/stack intern + alloc/free pairing). WASM linear memory is
- *   grow-only, so peak WASM memory ≈ K × worst-rank-peak. Higher K gives
- *   linear parse throughput speedup at linear memory cost. Each worker
- *   recycles its WASM instance after every rank to bound steady-state.
+ * Stage 1 — parse: K WASM workers, pickle → IR JSON.
+ * Stage 2 — layout: K pure-JS workers, IR → full RankData. Layout
+ *   workers hold the full RankData locally; during the load they emit
+ *   only a ~64-byte summary to the main thread. This is the key move
+ *   that keeps main-thread long tasks near-zero during a 128-rank
+ *   load: no structured-clone-a-full-RankData-per-flush.
  *
- * Stage 2 — layout: K workers, pure JS (no WASM). Polygon layout +
- *   treemap + anomaly detection + strip packing. Lives in JS heap which
- *   is GC'd, so parallel layout workers don't accumulate memory the
- *   way WASM does.
- *
- * Data flow: task → parse queue → idle parse worker → IR → layout queue
- *   → idle layout worker → RankData → main.
- *
- * Per-rank timings are logged to `console.table` at the end of each
- * processAll so you can see whether parse or layout is the bottleneck.
+ * Rank switch: main thread calls requestFull(rank); the pool routes
+ * to the worker that produced that rank and posts back a full
+ * structured clone (not a transfer — repeatable). ~20-50ms per switch.
  */
 
 // @ts-ignore — Vite handles this URL pattern for WASM
@@ -28,9 +22,15 @@ export interface WorkerTask {
   getBuffer: () => Promise<ArrayBuffer>;
 }
 
-export interface WorkerResult {
+export interface RankSummary {
   rank: number;
-  data: RankData;
+  total_reserved: number;
+  total_allocated: number;
+  total_active: number;
+  segment_count: number;
+  block_count: number;
+  active_bytes: number;
+  inactive_bytes: number;
 }
 
 export type LoadPhase =
@@ -44,19 +44,23 @@ export interface ProgressSnapshot {
   inFlight: number;
   total: number;
   phase: LoadPhase;
-  /** Rank numbers currently being parsed OR laid out. */
   inFlightRanks: number[];
-  /** User-visible concurrency (parse/layout workers). */
   poolSize: number;
 }
 
 export interface WorkerPool {
   processAll: (tasks: WorkerTask[]) => Promise<void>;
+  requestFull: (rank: number) => Promise<RankData>;
   terminate: () => void;
 }
 
+interface PendingRequest {
+  resolve: (data: RankData) => void;
+  reject: (err: Error) => void;
+}
+
 export function createWorkerPool(
-  onResult: (result: WorkerResult) => void,
+  onSummary: (rank: number, summary: RankSummary) => void,
   onError: (rank: number, error: string) => void,
   onProgress: (snap: ProgressSnapshot) => void,
   opts?: { poolSize?: number },
@@ -64,7 +68,6 @@ export function createWorkerPool(
   const requested = opts?.poolSize ?? Math.min(navigator.hardwareConcurrency || 4, 8);
   const K = Math.max(1, Math.min(requested, 32));
 
-  // K parse workers (WASM) + K layout workers (pure JS).
   const parseWorkers: Worker[] = [];
   for (let i = 0; i < K; i++) {
     parseWorkers.push(new Worker(new URL("./parseWorker.ts", import.meta.url), { type: "module" }));
@@ -74,14 +77,18 @@ export function createWorkerPool(
     layoutWorkers.push(new Worker(new URL("./layoutWorker.ts", import.meta.url), { type: "module" }));
   }
 
+  // Which layout worker produced each rank — used to route requestFull.
+  const rankOwner = new Map<number, Worker>();
+  // Outstanding requestFull promises keyed by requestId.
+  const pendingFullRequests = new Map<number, PendingRequest>();
+  let nextRequestId = 1;
+
   let terminated = false;
 
   async function processAll(tasks: WorkerTask[]) {
     if (terminated || tasks.length === 0) return;
 
     const total = tasks.length;
-
-    // In-flight tracking (per-worker slot).
     const parseBusyRank: number[] = new Array(K).fill(-1);
     const layoutBusyRank: number[] = new Array(K).fill(-1);
 
@@ -104,7 +111,6 @@ export function createWorkerPool(
     const wasmModule = await WebAssembly.compile(wasmBytes);
     onProgress(snap(0, "init_workers"));
 
-    // Init all parse workers in parallel.
     await Promise.all(parseWorkers.map((w) => new Promise<void>((resolve, reject) => {
       w.onmessage = (e) => {
         if (e.data.type === "ready") resolve();
@@ -113,14 +119,12 @@ export function createWorkerPool(
       w.postMessage({ type: "init", wasmModule });
     })));
 
-    // ---- Scheduler state ----
     let completed = 0;
     let nextTaskIdx = 0;
     const layoutQueue: { rank: number; ir: string }[] = [];
     const idleParseWorkers: Worker[] = [...parseWorkers];
     const idleLayoutWorkers: Worker[] = [...layoutWorkers];
 
-    // Per-rank timing for the final console.table summary.
     interface Timing { rank: number; wasmMs: number; irKB: number; layoutMs: number; totalMs: number; }
     const timings = new Map<number, Timing>();
     const startedAt = new Map<number, number>();
@@ -161,6 +165,7 @@ export function createWorkerPool(
           const { rank, ir } = layoutQueue.shift()!;
           const wIdx = layoutWorkers.indexOf(worker);
           layoutBusyRank[wIdx] = rank;
+          rankOwner.set(rank, worker);
           onProgress(snap(completed, "parsing"));
           worker.postMessage({ type: "layout", rank, ir });
         }
@@ -202,10 +207,10 @@ export function createWorkerPool(
 
       for (const worker of layoutWorkers) {
         worker.onmessage = (e: MessageEvent) => {
-          const { type, rank, data, error, layoutMs } = e.data;
+          const { type, rank, summary, error, layoutMs, requestId, data } = e.data;
           const wIdx = layoutWorkers.indexOf(worker);
-          if (type === "result") {
-            onResult({ rank, data });
+          if (type === "summary") {
+            onSummary(rank, summary);
             completed++;
             const t = timings.get(rank);
             if (t) {
@@ -213,15 +218,26 @@ export function createWorkerPool(
               const start = startedAt.get(rank) ?? wallStart;
               t.totalMs = Math.round(performance.now() - start);
             }
+            layoutBusyRank[wIdx] = -1;
+            idleLayoutWorkers.push(worker);
+            onProgress(snap(completed, completed >= total ? "done" : "parsing"));
+            dispatchLayoutIfPossible();
+            maybeFinish();
+          } else if (type === "full") {
+            const p = pendingFullRequests.get(requestId);
+            if (p) { pendingFullRequests.delete(requestId); p.resolve(data); }
+          } else if (type === "fullMiss") {
+            const p = pendingFullRequests.get(requestId);
+            if (p) { pendingFullRequests.delete(requestId); p.reject(new Error(`rank ${rank} not held by worker`)); }
           } else if (type === "error") {
             onError(rank, error);
             completed++;
+            layoutBusyRank[wIdx] = -1;
+            idleLayoutWorkers.push(worker);
+            onProgress(snap(completed, completed >= total ? "done" : "parsing"));
+            dispatchLayoutIfPossible();
+            maybeFinish();
           }
-          layoutBusyRank[wIdx] = -1;
-          idleLayoutWorkers.push(worker);
-          onProgress(snap(completed, completed >= total ? "done" : "parsing"));
-          dispatchLayoutIfPossible();
-          maybeFinish();
         };
         worker.onerror = (e) => {
           const wIdx = layoutWorkers.indexOf(worker);
@@ -249,13 +265,26 @@ export function createWorkerPool(
     }
   }
 
+  function requestFull(rank: number): Promise<RankData> {
+    const worker = rankOwner.get(rank);
+    if (!worker) return Promise.reject(new Error(`no worker owns rank ${rank}`));
+    const requestId = nextRequestId++;
+    return new Promise<RankData>((resolve, reject) => {
+      pendingFullRequests.set(requestId, { resolve, reject });
+      worker.postMessage({ type: "requestFull", rank, requestId });
+    });
+  }
+
   function terminate() {
     terminated = true;
+    for (const p of pendingFullRequests.values()) p.reject(new Error("pool terminated"));
+    pendingFullRequests.clear();
+    rankOwner.clear();
     for (const w of parseWorkers) w.terminate();
     for (const w of layoutWorkers) w.terminate();
     parseWorkers.length = 0;
     layoutWorkers.length = 0;
   }
 
-  return { processAll, terminate };
+  return { processAll, requestFull, terminate };
 }
