@@ -16,6 +16,8 @@
 import { initSync, process_snapshot } from "../../../wasm/pkg/memviz_wasm.js";
 import { parseRank } from "./parseRank";
 
+let wasmModule: WebAssembly.Module | null = null;
+
 interface AllocDetail {
   addr: number;
   size: number;
@@ -33,7 +35,8 @@ self.onmessage = (e: MessageEvent) => {
 
   if (type === "init") {
     try {
-      initSync({ module: e.data.wasmModule });
+      wasmModule = e.data.wasmModule;
+      initSync({ module: wasmModule! });
       ready = true;
       (self as any).postMessage({ type: "ready" });
     } catch (err: any) {
@@ -45,7 +48,7 @@ self.onmessage = (e: MessageEvent) => {
   if (type === "process") {
     const { rank, buffer } = e.data;
     try {
-      if (!ready) throw new Error("WASM not initialized");
+      if (!ready || !wasmModule) throw new Error("WASM not initialized");
       const json = process_snapshot(new Uint8Array(buffer), rank, 3000);
       const { data, detailsByAddr } = parseRank(json, rank);
       detailCache.set(rank, detailsByAddr);
@@ -53,6 +56,13 @@ self.onmessage = (e: MessageEvent) => {
         { type: "result", rank, data },
         [data.stripBuffer.buffer],
       );
+      // Recycle the WASM instance between ranks. The serde-pickle patch
+      // keeps memoized values alive for correctness — which in PyTorch
+      // traces means thousands of cloned Vec<Frame>s until the rank-level
+      // Value tree is dropped. The linear memory those clones used can't
+      // shrink (WebAssembly.Memory is grow-only), but re-initSync gives
+      // us a fresh Memory and the old one becomes garbage.
+      initSync({ module: wasmModule });
     } catch (err: any) {
       (self as any).postMessage({ type: "error", rank, error: String(err) });
     }
