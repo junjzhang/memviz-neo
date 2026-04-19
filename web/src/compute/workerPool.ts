@@ -85,6 +85,24 @@ export function createWorkerPool(
 
   let terminated = false;
 
+  // Hot-path timing. Aggregated into window.__memvizStats on each
+  // processAll run so the extension can pull it out after a load and
+  // identify which handler is producing main-thread long tasks.
+  const stats: Record<string, { count: number; sumMs: number; maxMs: number }> = {};
+  function timed<T>(label: string, fn: () => T): T {
+    const t0 = performance.now();
+    const r = fn();
+    const dur = performance.now() - t0;
+    const s = stats[label] || (stats[label] = { count: 0, sumMs: 0, maxMs: 0 });
+    s.count++;
+    s.sumMs += dur;
+    if (dur > s.maxMs) s.maxMs = dur;
+    return r;
+  }
+  if (typeof window !== "undefined" && import.meta.env.DEV) {
+    (window as any).__memvizStats = stats;
+  }
+
   async function processAll(tasks: WorkerTask[]) {
     if (terminated || tasks.length === 0) return;
 
@@ -106,6 +124,31 @@ export function createWorkerPool(
       };
     };
 
+    // Coalesce onProgress to one call per animation frame. Without this,
+    // worker messages (128 ranks × ~8 events = ~1000 pumps) fire per-message
+    // fileStore.set()s that slice vsync windows and drop frames in the
+    // timeline's WebGL render.
+    let rafPending = false;
+    let pendingSnap: ProgressSnapshot | null = null;
+    const flushProgress = () => {
+      rafPending = false;
+      if (pendingSnap) {
+        const s = pendingSnap;
+        pendingSnap = null;
+        timed("onProgress", () => onProgress(s));
+      }
+    };
+    const scheduleProgress = (s: ProgressSnapshot) => {
+      pendingSnap = s;
+      if (rafPending) return;
+      rafPending = true;
+      (typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (cb: FrameRequestCallback) => setTimeout(cb, 16))(flushProgress);
+    };
+
+    // Phase transitions (compile_wasm, init_workers, done) are rare —
+    // emit these synchronously so the UI gate flips instantly.
     onProgress(snap(0, "compile_wasm"));
     const wasmBytes = await fetch(wasmUrl).then((r) => r.arrayBuffer());
     const wasmModule = await WebAssembly.compile(wasmBytes);
@@ -130,7 +173,7 @@ export function createWorkerPool(
     const startedAt = new Map<number, number>();
     const wallStart = performance.now();
 
-    onProgress(snap(0, "parsing"));
+    scheduleProgress(snap(0, "parsing"));
 
     await new Promise<void>((resolveAll) => {
       function maybeFinish() {
@@ -146,7 +189,7 @@ export function createWorkerPool(
           const task = tasks[nextTaskIdx++];
           parseBusyRank[wIdx] = task.rank;
           startedAt.set(task.rank, performance.now());
-          onProgress(snap(completed, "parsing"));
+          scheduleProgress(snap(completed, "parsing"));
           task.getBuffer().then((buffer) => {
             worker.postMessage({ type: "parse", rank: task.rank, buffer }, [buffer]);
           }).catch((err) => {
@@ -166,13 +209,13 @@ export function createWorkerPool(
           const wIdx = layoutWorkers.indexOf(worker);
           layoutBusyRank[wIdx] = rank;
           rankOwner.set(rank, worker);
-          onProgress(snap(completed, "parsing"));
+          scheduleProgress(snap(completed, "parsing"));
           worker.postMessage({ type: "layout", rank, ir });
         }
       }
 
       for (const worker of parseWorkers) {
-        worker.onmessage = (e: MessageEvent) => {
+        worker.onmessage = (e: MessageEvent) => timed("parse:msg", () => {
           const { type, rank, ir, error, wasmMs, irBytes } = e.data;
           const wIdx = parseWorkers.indexOf(worker);
           if (type === "ir") {
@@ -195,7 +238,7 @@ export function createWorkerPool(
             dispatchParseIfPossible();
             maybeFinish();
           }
-        };
+        });
         worker.onerror = (e) => {
           const wIdx = parseWorkers.indexOf(worker);
           onError(-1, `Parse worker crashed: ${e.message}`);
@@ -206,11 +249,11 @@ export function createWorkerPool(
       }
 
       for (const worker of layoutWorkers) {
-        worker.onmessage = (e: MessageEvent) => {
+        worker.onmessage = (e: MessageEvent) => timed(`layout:${e.data.type}`, () => {
           const { type, rank, summary, error, layoutMs, requestId, data } = e.data;
           const wIdx = layoutWorkers.indexOf(worker);
           if (type === "summary") {
-            onSummary(rank, summary);
+            timed("onSummary", () => onSummary(rank, summary));
             completed++;
             const t = timings.get(rank);
             if (t) {
@@ -220,7 +263,7 @@ export function createWorkerPool(
             }
             layoutBusyRank[wIdx] = -1;
             idleLayoutWorkers.push(worker);
-            onProgress(snap(completed, completed >= total ? "done" : "parsing"));
+            scheduleProgress(snap(completed, completed >= total ? "done" : "parsing"));
             dispatchLayoutIfPossible();
             maybeFinish();
           } else if (type === "full") {
@@ -234,11 +277,11 @@ export function createWorkerPool(
             completed++;
             layoutBusyRank[wIdx] = -1;
             idleLayoutWorkers.push(worker);
-            onProgress(snap(completed, completed >= total ? "done" : "parsing"));
+            scheduleProgress(snap(completed, completed >= total ? "done" : "parsing"));
             dispatchLayoutIfPossible();
             maybeFinish();
           }
-        };
+        });
         worker.onerror = (e) => {
           const wIdx = layoutWorkers.indexOf(worker);
           onError(-1, `Layout worker crashed: ${e.message}`);
