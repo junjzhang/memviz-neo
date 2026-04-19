@@ -106,12 +106,44 @@ fn intern_frames(d: &DictCell, pools: &mut Pools) -> u32 {
     pools.intern_stack(indices)
 }
 
+/// Metadata from the root snapshot dict that isn't part of segments or
+/// traces but is useful to display as header context (e.g. the allocator
+/// config the snapshot was taken under).
+#[derive(Default)]
+struct RootMeta {
+    /// PYTORCH_CUDA_ALLOC_CONF string, e.g. "expandable_segments:True".
+    alloc_conf: String,
+    /// Whether expandable_segments is on (from the parsed setting dict).
+    expandable_segments: bool,
+    /// max_split_size in MB (-1 = unlimited).
+    max_split_size: i64,
+    /// garbage_collection_threshold, 0..1.
+    gc_threshold: f64,
+}
+
 fn parse_snapshot(
     data: &[u8],
     pools: &mut Pools,
-) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>) {
+) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>, RootMeta) {
     let root = pickle::parse(data).expect("pickle parse failed");
     let root_dict = pickle::as_dict(&root).expect("root not a dict");
+
+    // allocator_settings is a nested dict; drill in and pull the fields
+    // the header actually surfaces.
+    let mut meta = RootMeta::default();
+    if let Some(sv) = pickle::dict_get(root_dict, "allocator_settings") {
+        if let Some(sd) = pickle::as_dict(&sv) {
+            meta.alloc_conf = rd_str(sd, "PYTORCH_CUDA_ALLOC_CONF");
+            meta.max_split_size = rd_int(sd, "max_split_size");
+            if let Some(v) = pickle::dict_get(sd, "expandable_segments") {
+                meta.expandable_segments = matches!(v.as_ref(), RcValue::Bool(true));
+            }
+            if let Some(v) = pickle::dict_get(sd, "garbage_collection_threshold") {
+                if let RcValue::Float(f) = v.as_ref() { meta.gc_threshold = *f; }
+                else if let RcValue::Int(i) = v.as_ref() { meta.gc_threshold = *i as f64; }
+            }
+        }
+    }
 
     let mut segments: Vec<Segment> = Vec::new();
     if let Some(segs_v) = pickle::dict_get(root_dict, "segments") {
@@ -175,7 +207,7 @@ fn parse_snapshot(
     }
     traces.sort_by_key(|t| t.3);
 
-    (segments, traces)
+    (segments, traces, meta)
 }
 
 // ---- Top frame selection ----
@@ -336,7 +368,7 @@ fn emit_frame_idx(buf: &mut String, idx: u32) {
 #[wasm_bindgen]
 pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let mut pools = Pools::new();
-    let (segments, traces) = parse_snapshot(data, &mut pools);
+    let (segments, traces, meta) = parse_snapshot(data, &mut pools);
 
     let seg_active: i64 = segments.iter()
         .flat_map(|s| s.blocks.iter())
@@ -369,7 +401,13 @@ pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
         tr += s.total_size; ta += s.allocated_size; tac += s.active_size; sc += 1;
         for b in &s.blocks { bc += 1; if b.state == "active_allocated" { ab += b.size; } else if b.state == "inactive" { ib += b.size; } }
     }
-    j.push_str(&format!("\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib}}},"));
+    j.push_str(&format!(
+        "\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib},\"alloc_conf\":{},\"expandable_segments\":{},\"max_split_size\":{},\"gc_threshold\":{}}},",
+        json_str(&meta.alloc_conf),
+        meta.expandable_segments,
+        meta.max_split_size,
+        meta.gc_threshold,
+    ));
     j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"baseline\":{baseline},\"allocation_count\":{}}},", allocs.len()));
 
     // Interned frame pool: [[name, filename, line], ...]

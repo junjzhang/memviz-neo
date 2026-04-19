@@ -11,7 +11,7 @@ import type {
   TimelineBlock,
   AllocationDetail,
 } from "../types/timeline";
-import type { RankData, Anomaly } from "../compute";
+import type { RankData, Anomaly, SegmentRow, FlameData } from "../compute";
 import { getActivePool } from "./fileStore";
 
 // Main-thread "current rank" store. We hold the full RankData only for
@@ -33,6 +33,10 @@ interface DataState {
   timelineStripBuffer: Float32Array | null;
   timelineStripCount: number;
   timelineMaxBytesFull: number;
+  /** Per-allocator-segment rows for the SegmentTimeline view. */
+  segmentRows: SegmentRow[];
+  /** Call-stack pressure flamegraph for the current rank. */
+  flame: FlameData | null;
   /** Loading while waiting for a requestFull. Different from file load. */
   switching: boolean;
   error: string | null;
@@ -63,6 +67,8 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     timelineStripBuffer: data.stripBuffer,
     timelineStripCount: data.stripCount,
     timelineMaxBytesFull: data.maxBytesFull,
+    segmentRows: data.segmentRows,
+    flame: data.flame,
     focusedAddr: null,
     focusRange: null,
     switching: false,
@@ -83,6 +89,8 @@ const emptyState: Partial<DataState> = {
   timelineStripBuffer: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
+  segmentRows: [],
+  flame: null,
   switching: false,
   focusedAddr: null,
   focusRange: null,
@@ -105,6 +113,8 @@ export const useDataStore = create<DataState>((set, get) => ({
   timelineStripBuffer: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
+  segmentRows: [],
+  flame: null,
   switching: false,
   error: null,
   focusedAddr: null,

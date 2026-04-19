@@ -7,6 +7,14 @@ export interface RankSummary {
   block_count: number;
   active_bytes: number;
   inactive_bytes: number;
+  /** Raw PYTORCH_CUDA_ALLOC_CONF env var string, e.g.
+   *  "expandable_segments:True". Empty if the snapshot didn't record it. */
+  alloc_conf?: string;
+  expandable_segments?: boolean;
+  /** -1 means no split size cap. */
+  max_split_size?: number;
+  /** 0..1, 0 means disabled. */
+  gc_threshold?: number;
 }
 
 export interface TreemapNode {

@@ -9,7 +9,7 @@ import type { TimelineBlock } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
-import type { Allocation, RankData } from "./index";
+import type { Allocation, RankData, SegmentRow, SegmentAlloc } from "./index";
 import { blockColor } from "./palette";
 
 export interface ParseResult {
@@ -291,6 +291,34 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   // Per-hueKey instance counter so repeated allocs from the same call
   // site get lightness-shifted shades in the same color family.
   const instanceCount = new Map<number, number>();
+
+  // ---- Segment rows (SegmentTimeline view) ----
+  // Bucket allocs by the segment they land in. Build a sorted-by-addr
+  // index so each alloc's lookup is O(log N_seg). Segments without any
+  // top-N allocations still show up as empty rows so the allocator
+  // layout stays visible.
+  const segsByAddr = segments.slice().sort((a, b) => a.address - b.address);
+  const segRowByAddr = new Map<number, SegmentRow>();
+  for (const seg of segsByAddr) {
+    segRowByAddr.set(seg.address, {
+      segmentAddr: seg.address,
+      segmentType: seg.segment_type,
+      totalSize: seg.total_size,
+      allocs: [],
+    });
+  }
+  function findSegmentIdx(addr: number): number {
+    let lo = 0, hi = segsByAddr.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const seg = segsByAddr[mid];
+      if (addr < seg.address) hi = mid - 1;
+      else if (addr >= seg.address + seg.total_size) lo = mid + 1;
+      else return mid;
+    }
+    return -1;
+  }
+
   for (let i = 0; i < topAllocsIR.length; i++) {
     const a = topAllocsIR[i];
     // Prefer top_frame_idx for hue (user-code line); fall back to
@@ -332,7 +360,85 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
       stripOffset: startStripIdx,
       stripCount: stripsPerAlloc[i].length,
     };
+
+    // Assign this alloc to its owning segment row.
+    const segIdx = findSegmentIdx(a.addr);
+    if (segIdx >= 0) {
+      const seg = segsByAddr[segIdx];
+      const row = segRowByAddr.get(seg.address)!;
+      const sa: SegmentAlloc = {
+        addr: a.addr,
+        offsetInSeg: a.addr - seg.address,
+        size: a.size,
+        alloc_us: a.alloc_us,
+        free_us: freeUs,
+        top_frame_idx: a.top_frame_idx,
+        color: [r, g, bl],
+      };
+      row.allocs.push(sa);
+    }
   }
+  // Biggest cached segments first — matches the Memory Timeline's
+  // convention of putting the largest, most-significant data at the top.
+  const segmentRows: SegmentRow[] = [...segRowByAddr.values()]
+    .sort((a, b) => b.totalSize - a.totalSize);
+
+  // ---- Flame graph aggregate (call-stack → memory pressure) ----
+  // Build a prefix trie keyed by stack frame index, weighted by
+  // size × lifetime (bytes·μs). Only user-relevant frames participate:
+  // allocator-internal + C++ frames are stripped so the tree is
+  // readable for humans inspecting PyTorch code paths.
+  interface FlameTrie {
+    frameIdx: number;
+    weight: number;
+    kids: Map<number, FlameTrie>;
+  }
+  const flameRoot: FlameTrie = { frameIdx: -1, weight: 0, kids: new Map() };
+  function isInternalFrame(fi: number): boolean {
+    const f = framePool[fi];
+    if (!f) return true;
+    if (f.filename === "??") return true;
+    if (f.name.includes("CUDACachingAllocator")) return true;
+    if (f.filename.includes("memory_snapshot")) return true;
+    return false;
+  }
+  for (const a of topAllocsIR) {
+    const lifetime = a.free_us === -1 ? (timeMax - a.alloc_us) : (a.free_us - a.alloc_us);
+    if (lifetime <= 0) continue;
+    const weight = a.size * lifetime;
+    const stack = stackPool[a.stack_idx];
+    if (!stack) continue;
+    // PyTorch records frames leaf-first; flip to root-first so the
+    // flame graph reads naturally (top-level caller at the bottom).
+    flameRoot.weight += weight;
+    let cursor = flameRoot;
+    for (let k = stack.length - 1; k >= 0; k--) {
+      const fi = stack[k];
+      if (isInternalFrame(fi)) continue;
+      let child = cursor.kids.get(fi);
+      if (!child) {
+        child = { frameIdx: fi, weight: 0, kids: new Map() };
+        cursor.kids.set(fi, child);
+      }
+      child.weight += weight;
+      cursor = child;
+    }
+  }
+  // Flatten DFS into [{frameIdx, depth, weight, xStart}]. Children are
+  // ordered by descending weight so the biggest contributors line up
+  // on the left.
+  const flameNodes: { frameIdx: number; depth: number; weight: number; xStart: number }[] = [];
+  let flameMaxDepth = 0;
+  (function dfs(node: FlameTrie, depth: number, xStart: number) {
+    flameNodes.push({ frameIdx: node.frameIdx, depth, weight: node.weight, xStart });
+    if (depth > flameMaxDepth) flameMaxDepth = depth;
+    const kids = [...node.kids.values()].sort((a, b) => b.weight - a.weight);
+    let cursor = xStart;
+    for (const kid of kids) {
+      dfs(kid, depth + 1, cursor);
+      cursor += kid.weight;
+    }
+  })(flameRoot, 0, 0);
 
   const data: RankData = {
     summary,
@@ -353,6 +459,12 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     stripBuffer,
     stripCount: totalStrips,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
+    segmentRows,
+    flame: {
+      nodes: flameNodes,
+      totalWeight: flameRoot.weight,
+      maxDepth: flameMaxDepth,
+    },
     framePool,
     stackPool,
     stackByAddr,

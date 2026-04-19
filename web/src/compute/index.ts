@@ -16,6 +16,44 @@ export interface Allocation {
   stack_idx: number;
 }
 
+/** One segment row worth of data for the SegmentTimeline view.
+ *  Allocs are the subset of top-N allocations whose addr lives inside this
+ *  segment's [address, address+totalSize) range. */
+export interface SegmentAlloc {
+  addr: number;
+  offsetInSeg: number;
+  size: number;
+  alloc_us: number;
+  /** -1 means still alive at snapshot (draw to timeline_end). */
+  free_us: number;
+  top_frame_idx: number;
+  /** [r, g, b] in 0..1; same value the Memory Timeline uses for this alloc. */
+  color: [number, number, number];
+}
+
+export interface SegmentRow {
+  segmentAddr: number;
+  segmentType: string;
+  totalSize: number;
+  allocs: SegmentAlloc[];
+}
+
+/** One flame-graph rectangle. Coordinates are in weight units (bytes·μs
+ *  of memory pressure); the renderer converts to pixels using totalWeight. */
+export interface FlameNode {
+  /** Frame pool index; -1 for the synthetic root ("all"). */
+  frameIdx: number;
+  depth: number;
+  weight: number;
+  xStart: number;
+}
+
+export interface FlameData {
+  nodes: FlameNode[];
+  totalWeight: number;
+  maxDepth: number;
+}
+
 export interface RankData {
   summary: RankSummary;
   treemap: TreemapNode;
@@ -30,6 +68,12 @@ export interface RankData {
   stripCount: number;
   // Per-rank max bytes (for full-view fast path, avoids iterating blocks)
   maxBytesFull: number;
+  /** Per-segment allocator row data for the SegmentTimeline view. Sorted
+   *  by totalSize desc so the biggest cached segments render on top. */
+  segmentRows: SegmentRow[];
+  /** Flame graph: call-stack → memory pressure aggregate. Replaces the
+   *  old Treemap. */
+  flame: FlameData;
   // Interned frame records and stacks (stacks point into framePool).
   // Any top_frame_idx / source_idx in segments / blocks / allocations /
   // anomalies refers into framePool. Stack traces for the detail panel

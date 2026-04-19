@@ -31,6 +31,10 @@ export interface RankSummary {
   block_count: number;
   active_bytes: number;
   inactive_bytes: number;
+  alloc_conf?: string;
+  expandable_segments?: boolean;
+  max_split_size?: number;
+  gc_threshold?: number;
 }
 
 export type LoadPhase =

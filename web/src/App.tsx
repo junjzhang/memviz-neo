@@ -1,15 +1,17 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { ConfigProvider, theme } from "antd";
 import Layout from "./components/Layout";
 import FileSelector from "./components/FileSelector";
 import PhaseTimeline from "./views/PhaseTimeline";
-import Treemap from "./views/Treemap";
+import MemoryFlamegraph from "./views/MemoryFlamegraph";
 import TopAllocations from "./views/TopAllocations";
 import AddressMap from "./views/AddressMap";
 import MultiRank from "./views/MultiRank";
 import AnomalyPanel from "./views/AnomalyPanel";
+import SegmentTimeline from "./views/SegmentTimeline";
 import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
+import { useRankSummaries } from "./stores/rankStore";
 import { useContainerWidth } from "./hooks/useContainerWidth";
 
 export default function App() {
@@ -17,14 +19,19 @@ export default function App() {
   const firstRank = useFileStore((s) => s.ranks[0]);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
   const hasCurrentRank = useDataStore((s) => s.summary !== null);
+  // The K parse workers race — rank 0's summary isn't guaranteed to be
+  // the first to arrive. Only trigger requestFull(firstRank) once the
+  // owning layout worker actually holds it; otherwise the pool's
+  // rankOwner lookup throws "no worker owns rank N".
+  const firstRankReady = useRankSummaries(
+    (s) => firstRank !== undefined && s.summaries[firstRank] !== undefined,
+  );
 
-  // On the first rank arrival, fetch full data for it. Later rank arrivals
-  // during the load are summary-only and don't touch dataStore.
   useEffect(() => {
-    if (fileStatus === "ready" && firstRank !== undefined && !hasCurrentRank) {
+    if (fileStatus === "ready" && firstRankReady && !hasCurrentRank) {
       void setCurrentRank(firstRank);
     }
-  }, [fileStatus, firstRank, hasCurrentRank, setCurrentRank]);
+  }, [fileStatus, firstRankReady, firstRank, hasCurrentRank, setCurrentRank]);
 
   return (
     <ConfigProvider
@@ -152,12 +159,14 @@ function Dashboard() {
   // Stable-ish subscriptions — these only change on rank switch, not on
   // progressive load flushes. multiRankOverview + allRanks are read
   // inside MultiRankSection so they don't re-render the whole dashboard.
-  const treemap = useDataStore((s) => s.treemap);
+  const flame = useDataStore((s) => s.flame);
+  const framePool = useDataStore((s) => s.framePool);
   const topAllocations = useDataStore((s) => s.topAllocations);
   const segments = useDataStore((s) => s.segments);
   const timeline = useDataStore((s) => s.timeline);
   const timelineBlocks = useDataStore((s) => s.timelineBlocks);
   const anomalies = useDataStore((s) => s.anomalies);
+  const segmentRows = useDataStore((s) => s.segmentRows);
   const currentRank = useDataStore((s) => s.currentRank);
   const error = useDataStore((s) => s.error);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
@@ -171,6 +180,14 @@ function Dashboard() {
   const [gridRef, gridWidth] = useContainerWidth();
   const halfWidth = gridWidth > 0 ? Math.floor((gridWidth - 32) / 2) : 600;
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
+
+  // Shared pan/zoom view range. PhaseTimeline and SegmentTimeline both
+  // read/write this ref every frame — whoever pans either view, the
+  // other follows automatically with zero React re-renders.
+  const viewRangeRef = useRef<[number, number]>([0, 1]);
+  useEffect(() => {
+    if (timeline) viewRangeRef.current = [timeline.time_min, timeline.time_max];
+  }, [timeline?.time_min, timeline?.time_max]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Layout>
@@ -214,11 +231,37 @@ function Dashboard() {
                 width={tlWidth}
                 height={520}
                 currentRank={currentRank}
+                viewRangeRef={viewRangeRef}
               />
             ) : (
               <Empty />
             )}
           </Section>
+
+          {/* Allocator state timeline — same X axis as Memory Timeline,
+              Y rows = allocator segments. Pan/zoom syncs via shared ref. */}
+          {timeline && segmentRows.length > 0 && tlWidth > 0 && (
+            <Section
+              eyebrow="02b"
+              title="Allocator Segments"
+              meta={
+                <>
+                  <span className="mono hl">{rankTag}</span>
+                  <span className="mono faint" style={{ marginLeft: 12 }}>
+                    {segmentRows.length} segments
+                  </span>
+                </>
+              }
+            >
+              <SegmentTimeline
+                data={timeline}
+                rows={segmentRows}
+                width={tlWidth}
+                height={Math.min(480, 24 + 36 + segmentRows.length * 26)}
+                viewRangeRef={viewRangeRef}
+              />
+            </Section>
+          )}
         </div>
 
         {anomalies.length > 0 && (
@@ -257,12 +300,17 @@ function Dashboard() {
                 >
                   04
                 </span>
-                Memory Treemap
+                Memory Flame Graph
               </h2>
-              <span className="section-meta mono hl">{rankTag}</span>
+              <span
+                className="section-meta mono faint"
+                title="bytes × lifetime contributed by allocations passing through each frame"
+              >
+                pressure by call stack
+              </span>
             </div>
-            {treemap && halfWidth > 0 ? (
-              <Treemap data={treemap} width={halfWidth} height={450} />
+            {flame && flame.totalWeight > 0 && halfWidth > 0 ? (
+              <MemoryFlamegraph flame={flame} framePool={framePool} width={halfWidth} height={450} />
             ) : (
               <Empty />
             )}

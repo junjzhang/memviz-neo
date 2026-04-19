@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
-import { formatBytes } from "../utils";
+import type { RankSummary } from "../types/snapshot";
 
 export default function Layout({ children }: { children: ReactNode }) {
   const currentRank = useDataStore((s) => s.currentRank);
@@ -14,10 +14,6 @@ export default function Layout({ children }: { children: ReactNode }) {
     resetFiles();
     resetData();
   };
-
-  const utilPct = summary && summary.total_reserved > 0
-    ? ((summary.total_allocated / summary.total_reserved) * 100).toFixed(1)
-    : "—";
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
@@ -51,19 +47,14 @@ export default function Layout({ children }: { children: ReactNode }) {
           )}
         </div>
 
-        {summary && (
+        {/* Active / Inactive / Allocated / Util were moved to the
+            Multi-Rank hero card — don't duplicate here. Header only
+            holds identifying state (rank) and one-per-dataset config
+            (allocator settings). */}
+        {summary && (summary.alloc_conf !== undefined ||
+          summary.expandable_segments !== undefined) && (
           <div className="app-header-stats">
-            <HeaderStat label="Active" value={formatBytes(summary.active_bytes)} />
-            <div className="divider-v" />
-            <HeaderStat label="Inactive" value={formatBytes(summary.inactive_bytes)} />
-            <div className="divider-v" />
-            <HeaderStat
-              label="Allocated"
-              value={formatBytes(summary.total_allocated)}
-              sub={`/ ${formatBytes(summary.total_reserved)}`}
-            />
-            <div className="divider-v" />
-            <HeaderStat label="Util" value={`${utilPct}%`} accent />
+            <SettingsBadge summary={summary} />
           </div>
         )}
       </header>
@@ -149,28 +140,93 @@ export default function Layout({ children }: { children: ReactNode }) {
         }
         .hs-value.hl { color: var(--accent); }
         .hs-sub { font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); margin-left: 4px; }
+
+        .settings-badge {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 6px 10px;
+          border: 1px solid var(--border);
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--fg-muted);
+          cursor: help;
+          letter-spacing: 0.04em;
+        }
+        .settings-badge:hover { color: var(--fg); border-color: var(--border-strong); }
+        .settings-badge:hover .settings-popup { display: block; }
+        .settings-popup {
+          display: none;
+          position: absolute;
+          right: 0;
+          top: calc(100% + 6px);
+          min-width: 380px;
+          max-width: 560px;
+          padding: 12px 14px;
+          background: rgba(10,10,11,0.98);
+          border: 1px solid var(--border-strong);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+          z-index: 20;
+          white-space: normal;
+          text-align: left;
+        }
+        .settings-popup-row { margin-bottom: 10px; }
+        .settings-popup-row:last-child { margin-bottom: 0; }
+        .settings-popup-label {
+          font-family: var(--font-display);
+          font-size: 9px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--fg-faint);
+          margin-bottom: 4px;
+        }
+        .settings-popup-value {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--fg);
+          word-break: break-all;
+          line-height: 1.5;
+        }
       `}</style>
     </div>
   );
 }
 
-function HeaderStat({
-  label,
-  value,
-  sub,
-  accent,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  accent?: boolean;
-}) {
+function SettingsBadge({ summary }: { summary: RankSummary }) {
+  const conf = summary.alloc_conf || "";
+  const exp = summary.expandable_segments === true;
+  const mss = summary.max_split_size ?? -1;
+  const gc = summary.gc_threshold ?? 0;
+  // Compact inline label: show the most impactful setting.
+  const inline = exp ? "expandable" : conf ? "custom" : "default";
   return (
-    <div className="hs-item">
-      <div className="hs-label">{label}</div>
-      <div className={"hs-value" + (accent ? " hl" : "")}>
-        {value}
-        {sub && <span className="hs-sub">{sub}</span>}
+    <div className="settings-badge" title="Hover for PyTorch allocator settings">
+      <span>⚙</span>
+      <span style={{ opacity: 0.7 }}>{inline}</span>
+      <div className="settings-popup">
+        <div className="settings-popup-row">
+          <div className="settings-popup-label">PYTORCH_CUDA_ALLOC_CONF</div>
+          <div className="settings-popup-value">
+            {conf || <span style={{ color: "var(--fg-faint)" }}>(unset)</span>}
+          </div>
+        </div>
+        <div className="settings-popup-row">
+          <div className="settings-popup-label">Expandable Segments</div>
+          <div className="settings-popup-value">{exp ? "on" : "off"}</div>
+        </div>
+        <div className="settings-popup-row">
+          <div className="settings-popup-label">max_split_size</div>
+          <div className="settings-popup-value">
+            {mss < 0 ? <span style={{ color: "var(--fg-faint)" }}>unlimited</span> : `${mss} MB`}
+          </div>
+        </div>
+        <div className="settings-popup-row">
+          <div className="settings-popup-label">garbage_collection_threshold</div>
+          <div className="settings-popup-value">
+            {gc > 0 ? gc.toFixed(2) : <span style={{ color: "var(--fg-faint)" }}>disabled</span>}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -18,6 +18,8 @@ interface Props {
   width: number;
   height: number;
   currentRank: number;
+  /** Optional shared ref so sibling views (SegmentTimeline) pan in lockstep. */
+  viewRangeRef?: React.MutableRefObject<[number, number]>;
 }
 
 const ANOMALY_COLORS: Record<string, string> = {
@@ -82,6 +84,7 @@ export default function PhaseTimeline({
   width,
   height,
   currentRank,
+  viewRangeRef: sharedViewRangeRef,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);   // 2D overlay
   const glCanvasRef = useRef<HTMLCanvasElement>(null);  // WebGL strips
@@ -92,7 +95,12 @@ export default function PhaseTimeline({
   // Keeping them in refs means mousemove/keydown don't cause React to
   // re-render PhaseTimeline. The single rAF loop at the bottom reads
   // these refs each frame and repaints when dirtyRef is set.
-  const viewRangeRef = useRef<[number, number]>([data.time_min, data.time_max]);
+  const localViewRangeRef = useRef<[number, number]>([data.time_min, data.time_max]);
+  const viewRangeRef = sharedViewRangeRef ?? localViewRangeRef;
+  // Track the range we painted last frame; if the shared ref drifts
+  // (because the sibling SegmentTimeline panned it), treat it as a
+  // cross-view pan and mark dirty to follow along.
+  const lastPaintedViewRef = useRef<[number, number]>([data.time_min, data.time_max]);
   const rulerRef = useRef<Ruler | null>(null);
   const selRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const selStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -293,10 +301,16 @@ export default function PhaseTimeline({
     let rafId = 0;
     const draw = () => {
       rafId = requestAnimationFrame(draw);
+      // Auto-sync: if the sibling view panned the shared viewRange,
+      // mark ourselves dirty so we repaint in lockstep.
+      const vr = viewRangeRef.current;
+      const last = lastPaintedViewRef.current;
+      if (vr[0] !== last[0] || vr[1] !== last[1]) dirtyRef.current = true;
       // Skip frame entirely when nothing changed — rAF stays armed so
       // the next mutation gets picked up, but idle CPU drops to ~0.
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
+      lastPaintedViewRef.current = [vr[0], vr[1]];
       const maxBytes = computeMaxBytes();
       maxBytesRef.current = maxBytes;
       const [tMin, tMax] = viewRangeRef.current;
