@@ -1,23 +1,23 @@
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::collections::{BTreeMap, HashMap};
 use wasm_bindgen::prelude::*;
+use serde_pickle::value::HashableValue;
+use serde_pickle::Value;
 
-mod pickle;
-use pickle::{parse as pickle_parse, as_dict, dict_get, to_int, to_str_rc, with_list_items, ValueRc, Value};
-
-// ---- Intern pools ----
+// ---- Data structures ----
 
 #[derive(Clone, Hash, Eq, PartialEq)]
-struct FrameKey { name: Rc<str>, filename: Rc<str>, line: i64 }
+struct Frame { name: String, filename: String, line: i64 }
 
 /// Frame + stack intern pools.
 ///
-/// PyTorch memory traces carry hundreds of identical stack traces. Interning
-/// collapses the per-event frame duplication down to one u32 per event, cutting
-/// both JSON output size and the main thread's JS heap by 20-30×.
+/// PyTorch memory traces carry hundreds of identical stack traces — in
+/// iteration_2_exit one rank has 3.5M frame entries but only ~1400 unique
+/// frames and maybe a few hundred unique stacks. Interning collapses the
+/// per-event frame duplication down to one u32 per event, cutting both
+/// JSON output size and the main thread's JS heap by 20-30×.
 struct Pools {
-    frame_pool: Vec<FrameKey>,
-    frame_index: HashMap<FrameKey, u32>,
+    frame_pool: Vec<Frame>,
+    frame_index: HashMap<Frame, u32>,
     stack_pool: Vec<Vec<u32>>,
     stack_index: HashMap<Vec<u32>, u32>,
 }
@@ -31,7 +31,7 @@ impl Pools {
             stack_index: HashMap::new(),
         }
     }
-    fn intern_frame(&mut self, f: FrameKey) -> u32 {
+    fn intern_frame(&mut self, f: Frame) -> u32 {
         if let Some(&idx) = self.frame_index.get(&f) { return idx; }
         let idx = self.frame_pool.len() as u32;
         self.frame_index.insert(f.clone(), idx);
@@ -61,128 +61,150 @@ struct Allocation {
 
 struct Segment {
     address: i64, total_size: i64, allocated_size: i64, active_size: i64,
-    segment_type: Rc<str>, blocks: Vec<Block>,
+    segment_type: String, blocks: Vec<Block>,
 }
 
 struct Block {
     address: i64,
     size: i64,
-    state: Rc<str>,
+    state: String,
     top_frame_idx: u32,
 }
 
-// ---- Walk: consume the Rc<Value> tree into our own structs, interning ----
+// ---- Pickle value helpers ----
 
-fn intern_frames_from(dict_v: &ValueRc, pools: &mut Pools) -> u32 {
-    let mut indices: Vec<u32> = Vec::new();
-    let d = match as_dict(dict_v) { Some(d) => d, None => return pools.intern_stack(indices) };
-    let frames = match dict_get(d, "frames") { Some(f) => f, None => return pools.intern_stack(indices) };
-    with_list_items(&frames, |frame_v| {
-        if let Some(fd) = as_dict(frame_v) {
-            let name_v = dict_get(fd, "name");
-            let file_v = dict_get(fd, "filename");
-            let line_v = dict_get(fd, "line");
-            let key = FrameKey {
-                name: name_v.as_ref().map(to_str_rc).unwrap_or_else(|| Rc::from("")),
-                filename: file_v.as_ref().map(to_str_rc).unwrap_or_else(|| Rc::from("")),
-                line: line_v.as_ref().map(to_int).unwrap_or(0),
-            };
-            indices.push(pools.intern_frame(key));
-        }
-    });
+type Dict = BTreeMap<HashableValue, Value>;
+
+fn dict_get<'a>(d: &'a Dict, key: &str) -> Option<&'a Value> {
+    d.get(&HashableValue::String(key.to_string()))
+}
+
+fn val_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+        _ => String::new(),
+    }
+}
+
+fn val_int(v: &Value) -> i64 {
+    match v {
+        Value::I64(n) => *n,
+        Value::F64(n) => *n as i64,
+        Value::Bool(b) => if *b { 1 } else { 0 },
+        _ => 0,
+    }
+}
+
+fn dstr(d: &Dict, k: &str) -> String { dict_get(d, k).map(val_str).unwrap_or_default() }
+fn dint(d: &Dict, k: &str) -> i64 { dict_get(d, k).map(val_int).unwrap_or(0) }
+
+fn dlist<'a>(d: &'a Dict, k: &str) -> &'a [Value] {
+    match dict_get(d, k) {
+        Some(Value::List(l)) => l, Some(Value::Tuple(l)) => l, _ => &[],
+    }
+}
+
+fn as_dict(v: &Value) -> Option<&Dict> {
+    match v { Value::Dict(d) => Some(d), _ => None }
+}
+
+/// Parse the "frames" list of a dict into interned frame indices, then
+/// return a single stack index into the stack pool.
+fn intern_frames(d: &Dict, pools: &mut Pools) -> u32 {
+    let indices: Vec<u32> = dlist(d, "frames").iter().filter_map(|v| {
+        let fd = as_dict(v)?;
+        let frame = Frame {
+            name: dstr(fd, "name"),
+            filename: dstr(fd, "filename"),
+            line: dint(fd, "line"),
+        };
+        Some(pools.intern_frame(frame))
+    }).collect();
     pools.intern_stack(indices)
 }
 
+// ---- Pickle parsing ----
+
+fn parse_snapshot(
+    data: &[u8],
+    pools: &mut Pools,
+) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>) {
+    let opts = serde_pickle::DeOptions::new().replace_recursive_structures();
+    let val: Value = serde_pickle::from_slice(data, opts).expect("pickle parse failed");
+    let root = as_dict(&val).expect("root not dict");
+
+    let segments: Vec<Segment> = dlist(root, "segments").iter().filter_map(|sv| {
+        let sd = as_dict(sv)?;
+        let blocks = dlist(sd, "blocks").iter().filter_map(|bv| {
+            let bd = as_dict(bv)?;
+            let stack_idx = intern_frames(bd, pools);
+            let top_frame_idx = resolve_top_frame_from_stack(stack_idx, pools);
+            Some(Block {
+                address: dint(bd, "address"),
+                size: dint(bd, "size"),
+                state: dstr(bd, "state"),
+                top_frame_idx,
+            })
+        }).collect();
+        Some(Segment {
+            address: dint(sd, "address"), total_size: dint(sd, "total_size"),
+            allocated_size: dint(sd, "allocated_size"), active_size: dint(sd, "active_size"),
+            segment_type: dstr(sd, "segment_type"), blocks,
+        })
+    }).collect();
+
+    // Flatten device_traces — device index used to disambiguate addresses across GPUs
+    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::new(); // (action, device_addr_key, size, time_us, raw_addr, stack_idx)
+    for (dev_idx, dt) in dlist(root, "device_traces").iter().enumerate() {
+        let evs = match dt { Value::List(l) => l.as_slice(), Value::Tuple(l) => l.as_slice(), _ => continue };
+        for ev in evs {
+            let ed = match as_dict(ev) { Some(d) => d, None => continue };
+            if dict_get(ed, "addr").is_none() { continue; }
+            let addr = dint(ed, "addr");
+            let device_addr = (dev_idx as i64) << 48 | (addr & 0x0000_FFFF_FFFF_FFFF);
+            let stack_idx = intern_frames(ed, pools);
+            traces.push((dstr(ed, "action"), device_addr, dint(ed, "size"), dint(ed, "time_us"), addr, stack_idx));
+        }
+    }
+    traces.sort_by_key(|t| t.3);
+
+    (segments, traces)
+}
+
+// ---- Top frame selection ----
+
+/// Pick the "most meaningful" frame index from a stack:
+///   first python (.py) frame that isn't a CUDA allocator internal,
+///   else the first non-internal frame,
+///   else NO_FRAME.
 fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
     let stack = &pools.stack_pool[stack_idx as usize];
+    // first .py
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if f.filename.as_ref() == "??"
-            || f.name.contains("CUDACachingAllocator")
-            || f.filename.contains("memory_snapshot") { continue; }
-        if f.filename.contains(".py") { return fidx; }
+        if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
+            continue;
+        }
+        if f.filename.contains(".py") {
+            return fidx;
+        }
     }
+    // fallback: first non-internal
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if f.filename.as_ref() == "??"
-            || f.name.contains("CUDACachingAllocator")
-            || f.filename.contains("memory_snapshot") { continue; }
+        if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
+            continue;
+        }
         return fidx;
     }
     NO_FRAME
 }
 
-fn parse_snapshot(
-    data: &[u8],
-    pools: &mut Pools,
-) -> (Vec<Segment>, Vec<(Rc<str>, i64, i64, i64, i64, u32)>) {
-    let root = pickle_parse(data).expect("pickle parse failed");
-    let root_d = match as_dict(&root) {
-        Some(d) => d,
-        None => return (Vec::new(), Vec::new()),
-    };
-
-    // ---- Segments ----
-    let mut segments: Vec<Segment> = Vec::new();
-    if let Some(seg_list) = dict_get(root_d, "segments") {
-        with_list_items(&seg_list, |sv| {
-            let sd = match as_dict(sv) { Some(d) => d, None => return };
-            let mut blocks: Vec<Block> = Vec::new();
-            if let Some(bl) = dict_get(sd, "blocks") {
-                with_list_items(&bl, |bv| {
-                    let bd = match as_dict(bv) { Some(d) => d, None => return };
-                    let stack_idx = intern_frames_from(bv, pools);
-                    let top = resolve_top_frame_from_stack(stack_idx, pools);
-                    blocks.push(Block {
-                        address: dict_get(bd, "address").as_ref().map(to_int).unwrap_or(0),
-                        size: dict_get(bd, "size").as_ref().map(to_int).unwrap_or(0),
-                        state: dict_get(bd, "state").as_ref().map(to_str_rc).unwrap_or_else(|| Rc::from("")),
-                        top_frame_idx: top,
-                    });
-                });
-            }
-            segments.push(Segment {
-                address: dict_get(sd, "address").as_ref().map(to_int).unwrap_or(0),
-                total_size: dict_get(sd, "total_size").as_ref().map(to_int).unwrap_or(0),
-                allocated_size: dict_get(sd, "allocated_size").as_ref().map(to_int).unwrap_or(0),
-                active_size: dict_get(sd, "active_size").as_ref().map(to_int).unwrap_or(0),
-                segment_type: dict_get(sd, "segment_type").as_ref().map(to_str_rc).unwrap_or_else(|| Rc::from("")),
-                blocks,
-            });
-        });
-    }
-
-    // ---- Traces ----
-    let mut traces: Vec<(Rc<str>, i64, i64, i64, i64, u32)> = Vec::new();
-    if let Some(dev_list) = dict_get(root_d, "device_traces") {
-        let mut dev_idx: i64 = 0;
-        with_list_items(&dev_list, |dv| {
-            with_list_items(dv, |ev| {
-                let ed = match as_dict(ev) { Some(d) => d, None => return };
-                let addr_v = match dict_get(ed, "addr") { Some(v) => v, None => return };
-                let addr = to_int(&addr_v);
-                let device_addr = (dev_idx << 48) | (addr & 0x0000_FFFF_FFFF_FFFF);
-                let stack_idx = intern_frames_from(ev, pools);
-                let action = dict_get(ed, "action").as_ref().map(to_str_rc).unwrap_or_else(|| Rc::from(""));
-                let size = dict_get(ed, "size").as_ref().map(to_int).unwrap_or(0);
-                let time_us = dict_get(ed, "time_us").as_ref().map(to_int).unwrap_or(0);
-                traces.push((action, device_addr, size, time_us, addr, stack_idx));
-            });
-            dev_idx += 1;
-        });
-    }
-    traces.sort_by_key(|t| t.3);
-
-    // root Value tree drops here (the binding goes out of scope); memo
-    // table and all Rc<Value> get released. Only segments + traces (light
-    // structs) remain in WASM memory.
-    (segments, traces)
-}
-
 // ---- Alloc/free pairing ----
 
 fn build_allocations(
-    traces: &[(Rc<str>, i64, i64, i64, i64, u32)],
+    traces: &[(String, i64, i64, i64, i64, u32)],
     pools: &Pools,
 ) -> (Vec<Allocation>, i64, i64, i64) {
     if traces.is_empty() { return (vec![], 0, 0, 0); }
@@ -193,7 +215,7 @@ fn build_allocations(
     let mut peak: i64 = 0;
 
     for (action, device_addr, size, time_us, raw_addr, stack_idx) in traces {
-        match action.as_ref() {
+        match action.as_str() {
             "alloc" => {
                 pending.insert(*device_addr, P {
                     raw_addr: *raw_addr, size: *size, time_us: *time_us,
@@ -299,10 +321,6 @@ fn emit_frame_idx(buf: &mut String, idx: u32) {
     if idx == NO_FRAME { buf.push_str("-1"); } else { let _ = std::fmt::Write::write_fmt(buf, format_args!("{}", idx as i64)); }
 }
 
-// silence unused warnings for types we carry through pickle::
-#[allow(dead_code)]
-fn _phantom(_: &Value) {}
-
 // ---- WASM entry ----
 
 #[wasm_bindgen]
@@ -320,12 +338,13 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let (mut tr, mut ta, mut tac, mut sc, mut bc, mut ab, mut ib) = (0i64,0,0,0usize,0usize,0i64,0i64);
     for s in &segments {
         tr += s.total_size; ta += s.allocated_size; tac += s.active_size; sc += 1;
-        for b in &s.blocks { bc += 1; if b.state.as_ref() == "active_allocated" { ab += b.size; } else if b.state.as_ref() == "inactive" { ib += b.size; } }
+        for b in &s.blocks { bc += 1; if b.state == "active_allocated" { ab += b.size; } else if b.state == "inactive" { ib += b.size; } }
     }
     j.push_str(&format!("\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib}}},"));
     j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"allocation_count\":{}}},", allocs.len()));
 
-    // Interned frame pool
+    // ---- Interned frame pool ----
+    // Shape: frame_pool = [[name, filename, line], ...]
     j.push_str("\"frame_pool\":[");
     for (i, f) in pools.frame_pool.iter().enumerate() {
         if i > 0 { j.push(','); }
@@ -333,7 +352,8 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Interned stack pool
+    // ---- Interned stack pool ----
+    // Shape: stack_pool = [[frame_idx, frame_idx, ...], ...]
     j.push_str("\"stack_pool\":[");
     for (i, stk) in pools.stack_pool.iter().enumerate() {
         if i > 0 { j.push(','); }
@@ -346,7 +366,7 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Blocks with strips
+    // Blocks with strips. top_frame_idx replaces the inline top_frame string.
     j.push_str("\"blocks\":[");
     let mut strips_per: Vec<Vec<&[i64; 4]>> = vec![vec![]; n];
     for s in &strips { strips_per[s[0] as usize].push(s); }
@@ -373,7 +393,8 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Segments
+    // Segments for treemap / address map. top_frame_idx replaces the
+    // inline top_frame string per block.
     j.push_str("\"segments\":[");
     for (si, s) in segments.iter().enumerate() {
         if si > 0 { j.push(','); }
@@ -390,7 +411,9 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Alloc details — top_idx only
+    // Alloc details — only the top_idx allocations. Each carries just
+    // scalars + stack_idx now; frames resolve via pool lookup on the JS
+    // side (getDetail) instead of inlining 70 frame dicts per entry.
     j.push_str("\"alloc_details\":[");
     for (i, &ai) in top_idx.iter().enumerate() {
         let a = &allocs[ai];

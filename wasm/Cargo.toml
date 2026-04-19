@@ -8,7 +8,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-pickle = "1"
 js-sys = "0.3"
+
+# Patched serde-pickle — upstream's ref-count tracking for MEMOIZE/BINGET
+# gets out-of-sync on PyTorch memory snapshots with heavily shared frames
+# lists, producing None values. See vendor/serde-pickle/src/de.rs.
+[patch.crates-io]
+serde-pickle = { path = "vendor/serde-pickle" }
 
 [profile.release]
 opt-level = "s"
