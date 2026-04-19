@@ -101,6 +101,13 @@ export default function PhaseTimeline({
   // (because the sibling SegmentTimeline panned it), treat it as a
   // cross-view pan and mark dirty to follow along.
   const lastPaintedViewRef = useRef<[number, number]>([data.time_min, data.time_max]);
+  // Y-axis view. `manualYRangeRef` overrides auto-fit — set by selection
+  // rectangle (drag zoom) or Shift+W/S; null means "auto-fit yMax to the
+  // max block top in the current X window, floor at 0". `yRangeRef`
+  // always holds the range we painted last frame so mouse handlers and
+  // hitTest can project bytes ↔ pixels without recomputing.
+  const manualYRangeRef = useRef<[number, number] | null>(null);
+  const yRangeRef = useRef<[number, number]>([0, 1]);
   const rulerRef = useRef<Ruler | null>(null);
   const selRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const selStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -222,11 +229,8 @@ export default function PhaseTimeline({
   }, [blocks, stripBuffer, totalXRange, xAxisMode]);
 
   // maxBytes is computed inside the rAF loop from viewRangeRef — no
-  // useMemo because viewRangeRef isn't reactive. Keep a ref so hitTest
-  // and mouse handlers (which need yToBytes too) can read the last
-  // frame's value without recomputing.
-  const maxBytesRef = useRef<number>(maxBytesFull || data.peak_bytes * 1.1);
-
+  // useMemo because viewRangeRef isn't reactive. Mouse handlers read
+  // yRangeRef (updated every paint) for bytes ↔ pixel projection.
   function computeMaxBytes(): number {
     const [tMin, tMax] = viewRangeRef.current;
     // Full-view fast path. In time mode we compare to [time_min, time_max];
@@ -256,6 +260,7 @@ export default function PhaseTimeline({
     } else {
       viewRangeRef.current = [data.time_min, data.time_max];
     }
+    manualYRangeRef.current = null;
     setSelectedBlock(null);
     setDetail(null);
     rulerRef.current = null;
@@ -280,11 +285,17 @@ export default function PhaseTimeline({
     [plotW],
   );
   const bytesToY = useCallback(
-    (b: number) => MARGIN.top + plotH - (b / maxBytesRef.current) * plotH,
+    (b: number) => {
+      const [yMin, yMax] = yRangeRef.current;
+      return MARGIN.top + plotH - ((b - yMin) / (yMax - yMin)) * plotH;
+    },
     [plotH],
   );
   const yToBytes = useCallback(
-    (y: number) => ((MARGIN.top + plotH - y) / plotH) * maxBytesRef.current,
+    (y: number) => {
+      const [yMin, yMax] = yRangeRef.current;
+      return yMin + ((MARGIN.top + plotH - y) / plotH) * (yMax - yMin);
+    },
     [plotH],
   );
 
@@ -338,15 +349,24 @@ export default function PhaseTimeline({
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
       lastPaintedViewRef.current = [vr[0], vr[1]];
-      const maxBytes = computeMaxBytes();
-      maxBytesRef.current = maxBytes;
+      // Y range: manual override (from selection drag / Shift+W/S) wins;
+      // otherwise auto-fit to the visible X window.
+      let yMin: number, yMax: number;
+      if (manualYRangeRef.current) {
+        [yMin, yMax] = manualYRangeRef.current;
+      } else {
+        yMin = 0;
+        yMax = computeMaxBytes();
+      }
+      yRangeRef.current = [yMin, yMax];
+      const maxBytes = yMax; // back-compat alias for existing uses below
       const [tMin, tMax] = viewRangeRef.current;
       const ruler = rulerRef.current;
       const selRect = selRectRef.current;
 
       // WebGL: draw strips (one draw call, GPU-accelerated)
       if (glRef.current) {
-        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, maxBytes, timeOrigin);
+        drawStrips(glRef.current, width, height, MARGIN.left, MARGIN.top, plotW, plotH, tMin, tMax, yMin, yMax, timeOrigin);
       }
 
       // 2D overlay canvas: clear transparent, then fill margins opaque
@@ -578,7 +598,7 @@ export default function PhaseTimeline({
       // Y axis — labels + grid lines
       ctx.fillStyle = COLOR_AXIS; ctx.font = FONT_MONO; ctx.textAlign = "right";
       for (let i = 0; i <= 5; i++) {
-        const b = (maxBytes / 5) * i, y = bytesToY(b);
+        const b = yMin + ((yMax - yMin) / 5) * i, y = bytesToY(b);
         ctx.fillText(formatBytes(b), MARGIN.left - 12, y + 4);
         ctx.strokeStyle = COLOR_GRID; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(MARGIN.left, y); ctx.lineTo(MARGIN.left + plotW, y); ctx.stroke();
@@ -970,9 +990,41 @@ export default function PhaseTimeline({
     function tick() {
       if (!running) return;
       const keys = keysDownRef.current;
-      const hasNav = keys.has("a") || keys.has("d") || keys.has("w") || keys.has("s")
-        || keys.has("arrowleft") || keys.has("arrowright") || keys.has("arrowup") || keys.has("arrowdown");
-      if (hasNav) {
+      const shift = keys.has("shift");
+      const hasYZoom = shift && (keys.has("w") || keys.has("s") || keys.has("arrowup") || keys.has("arrowdown"));
+      const hasXNav = !shift && (keys.has("a") || keys.has("d") || keys.has("w") || keys.has("s")
+        || keys.has("arrowleft") || keys.has("arrowright") || keys.has("arrowup") || keys.has("arrowdown"));
+
+      if (hasYZoom) {
+        // Shift+W/S → zoom Y around the view center. Seeds manual range
+        // from the current auto-fit the first time, then grows/shrinks it.
+        const zoomRate = 0.97;
+        let cur = manualYRangeRef.current;
+        if (!cur) cur = [yRangeRef.current[0], yRangeRef.current[1]];
+        const [yMin0, yMax0] = cur;
+        const span = yMax0 - yMin0;
+        const c = (yMin0 + yMax0) / 2;
+        const peakCap = (data.peak_bytes || yMax0) * 1.1;
+        let nYMin = yMin0, nYMax = yMax0;
+        if (keys.has("w") || keys.has("arrowup")) {
+          const ns = span * zoomRate;
+          if (ns > Math.max(1, peakCap * 0.001)) {
+            nYMin = Math.max(0, c - ns / 2);
+            nYMax = nYMin + ns;
+          }
+        }
+        if (keys.has("s") || keys.has("arrowdown")) {
+          const ns = Math.min(peakCap, span / zoomRate);
+          nYMin = Math.max(0, c - ns / 2);
+          nYMax = Math.min(peakCap, nYMin + ns);
+        }
+        if (nYMin !== yMin0 || nYMax !== yMax0) {
+          manualYRangeRef.current = [nYMin, nYMax];
+          invalidate();
+        }
+      }
+
+      if (hasXNav) {
         const [tMin, tMax] = viewRangeRef.current;
         const range = tMax - tMin;
         // Bounds track whichever axis mode is active.
@@ -1063,16 +1115,32 @@ export default function PhaseTimeline({
         const dy = Math.abs(my - selStartRef.current.y);
 
         if (dx > 5 || dy > 5) {
-          // Selection rectangle → zoom into region
+          // Selection rectangle → zoom both X and Y into the region.
+          // Clamp to plot bounds so dragging past the axis doesn't produce
+          // a negative / out-of-range span.
           const cx1 = Math.max(MARGIN.left, Math.min(selStartRef.current.x, mx));
           const cx2 = Math.min(MARGIN.left + plotW, Math.max(selStartRef.current.x, mx));
+          const cy1 = Math.max(MARGIN.top, Math.min(selStartRef.current.y, my));
+          const cy2 = Math.min(MARGIN.top + plotH, Math.max(selStartRef.current.y, my));
           const newTMin = xToTime(cx1);
           const newTMax = xToTime(cx2);
           const minSpan = xAxisMode === "event" ? 1 : 100;
           if (newTMax - newTMin > minSpan) {
             viewRangeRef.current = [newTMin, newTMax];
-            invalidate();
           }
+          // Y: top of rect → larger bytes, bottom → smaller. Only commit
+          // if the drag is tall enough to distinguish from a pure X drag.
+          if (Math.abs(cy2 - cy1) > 8) {
+            const [yMinCur, yMaxCur] = yRangeRef.current;
+            const bTop = yToBytes(cy1);
+            const bBot = yToBytes(cy2);
+            const minY = Math.max(0, Math.min(bTop, bBot));
+            const maxY = Math.min(yMaxCur, Math.max(bTop, bBot));
+            if (maxY - minY > (yMaxCur - yMinCur) * 0.01) {
+              manualYRangeRef.current = [minY, maxY];
+            }
+          }
+          invalidate();
         } else {
           // Click — flag or block selection
           if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
@@ -1143,6 +1211,7 @@ export default function PhaseTimeline({
           onDoubleClick={() => {
             if (xAxisMode === "event") viewRangeRef.current = [0, totalXRange];
             else viewRangeRef.current = [data.time_min, data.time_max];
+            manualYRangeRef.current = null;
             invalidate();
           }}
         />
@@ -1195,7 +1264,10 @@ export default function PhaseTimeline({
         <span>navigate</span>
         <span className="tl-hint-sep">·</span>
         <Kbd>W</Kbd><span className="tl-hint-slash">/</span><Kbd>S</Kbd>
-        <span>zoom</span>
+        <span>zoom X</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>⇧W</Kbd><span className="tl-hint-slash">/</span><Kbd>⇧S</Kbd>
+        <span>zoom Y</span>
         <span className="tl-hint-sep">·</span>
         <Kbd>R</Kbd><span>+drag</span>
         <span>mem ruler</span>
@@ -1204,7 +1276,7 @@ export default function PhaseTimeline({
         <span>time ruler</span>
         <span className="tl-hint-sep">·</span>
         <Kbd>drag</Kbd>
-        <span>zoom to region</span>
+        <span>zoom to box</span>
         <span className="tl-hint-sep">·</span>
         <Kbd>dblclick</Kbd>
         <span>reset</span>

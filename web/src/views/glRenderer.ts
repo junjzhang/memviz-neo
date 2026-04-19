@@ -132,7 +132,8 @@ export function drawStrips(
   plotH: number,
   tMin: number,
   tMax: number,
-  maxBytes: number,
+  yMin: number,
+  yMax: number,
   timeOrigin: number,
 ) {
   const { gl, program, uXTf, uYTf, instanceCount } = state;
@@ -167,8 +168,10 @@ export function drawStrips(
   const xScale = (2 * plotW) / (canvasW * (tMaxN - tMinN));
   const xOffset = (2 * plotLeft) / canvasW - 1 - tMinN * xScale;
 
-  const yScale = (2 * plotH) / (canvasH * maxBytes);
-  const yOffset = 1 - (2 * (plotTop + plotH)) / canvasH;
+  // Map [yMin, yMax] → plot-area clip range. bytes * yScale + yOffset.
+  const ySpan = yMax - yMin;
+  const yScale = (2 * plotH) / (canvasH * ySpan);
+  const yOffset = 1 - (2 * (plotTop + plotH)) / canvasH - yMin * yScale;
 
   gl.uniform2f(uXTf, xScale, xOffset);
   gl.uniform2f(uYTf, yScale, yOffset);

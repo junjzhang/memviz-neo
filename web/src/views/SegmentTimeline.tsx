@@ -141,8 +141,9 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
       dirtyRef.current = false;
       lastViewRef.current = [vr[0], vr[1]];
 
-      // WebGL strip pass. We pass maxBytes = height so the y axis spans
-      // the whole canvas in pixel units, matching how stripPack encoded y.
+      // WebGL strip pass. We pass y range = [0, height] so the y axis
+      // spans the whole canvas in pixel units, matching how stripPack
+      // encoded y.
       if (glRef.current && stripPack.count > 0) {
         // In event mode the packed x values are already 0-based event
         // indices; in time mode they were packed as (t - time_min). The
@@ -154,7 +155,7 @@ export default function SegmentTimeline({ data, rows, width, height, viewRangeRe
           width, height,
           plotLeft, 0, plotW, height,
           vr[0], vr[1],
-          height,                // "maxBytes" == canvas height in px
+          0, height,             // y range in px
           timeOrigin,
         );
       }

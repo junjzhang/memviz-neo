@@ -16,22 +16,21 @@ import { useContainerWidth } from "./hooks/useContainerWidth";
 
 export default function App() {
   const fileStatus = useFileStore((s) => s.status);
-  const firstRank = useFileStore((s) => s.ranks[0]);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
   const hasCurrentRank = useDataStore((s) => s.summary !== null);
-  // The K parse workers race — rank 0's summary isn't guaranteed to be
-  // the first to arrive. Only trigger requestFull(firstRank) once the
-  // owning layout worker actually holds it; otherwise the pool's
-  // rankOwner lookup throws "no worker owns rank N".
-  const firstRankReady = useRankSummaries(
-    (s) => firstRank !== undefined && s.summaries[firstRank] !== undefined,
-  );
+  // Pick whichever rank lands first — the K parse workers race and
+  // rank 0 isn't guaranteed to finish first. Commit to that rank so
+  // the dashboard appears as soon as any worker has something to show.
+  const anyReadyRank = useRankSummaries((s) => {
+    for (const key in s.summaries) return Number(key);
+    return undefined;
+  });
 
   useEffect(() => {
-    if (fileStatus === "ready" && firstRankReady && !hasCurrentRank) {
-      void setCurrentRank(firstRank);
+    if (fileStatus === "ready" && anyReadyRank !== undefined && !hasCurrentRank) {
+      void setCurrentRank(anyReadyRank);
     }
-  }, [fileStatus, firstRankReady, firstRank, hasCurrentRank, setCurrentRank]);
+  }, [fileStatus, anyReadyRank, hasCurrentRank, setCurrentRank]);
 
   return (
     <ConfigProvider
