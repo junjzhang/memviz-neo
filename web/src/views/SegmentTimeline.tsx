@@ -24,12 +24,14 @@ const BOTTOM_PAD = 12;
 const LEFT_GUTTER = 120;    // room for segment label + size
 const RIGHT_PAD = 16;
 
-const COLOR_BG = "#0a0a0b";
-const COLOR_DIVIDER = "#17171a";
-const COLOR_LABEL = "#a1a1aa";
-const COLOR_LABEL_DIM = "#52525b";
-const COLOR_PRIVATE = "#fbbf24";
-const FONT_MONO = '10px "JetBrains Mono", ui-monospace, monospace';
+import {
+  COLOR_BG,
+  COLOR_DIVIDER,
+  COLOR_LABEL,
+  COLOR_LABEL_DIM,
+  COLOR_PRIVATE,
+  FONT_MONO_SM as FONT_MONO,
+} from "./theme";
 
 /**
  * Allocator-segment timeline. Rows = cached segments (large cached

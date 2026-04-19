@@ -26,17 +26,21 @@ export interface Strip {
 }
 
 /**
- * TimelineBlock no longer carries a strips: Strip[] array — that plain-
- * object array was the dominant structured-clone cost during load. The
- * strip data lives entirely in the pre-packed stripBuffer (7 floats per
- * strip). Use `stripOffset` (strip index, not float offset) and
- * `stripCount` to slice into it.
+ * One PyTorch allocation rendered on the Memory Timeline. ("block" is
+ * reserved for CUDA-allocator-level blocks — `BlockInfo` /
+ * `RankSummary.block_count`.)
+ *
+ * TimelineAlloc no longer carries a strips: Strip[] array — that
+ * plain-object array was the dominant structured-clone cost during
+ * load. The strip data lives entirely in the pre-packed stripBuffer
+ * (7 floats per strip). Use `stripOffset` (strip index, not float
+ * offset) and `stripCount` to slice into it.
  *
  * Layout: stripBuffer[(stripOffset + i) * STRIP_FLOATS + field]
  * fields: 0 t_start_norm, 1 t_end_norm, 2 y_offset, 3 size,
  *         4 r, 5 g, 6 b
  */
-export interface TimelineBlock {
+export interface TimelineAlloc {
   addr: number;
   size: number;
   alloc_us: number;
@@ -51,10 +55,6 @@ export interface TimelineBlock {
 }
 
 export const STRIP_FLOATS = 7;
-
-export interface TimelineBlocksResponse {
-  blocks: TimelineBlock[];
-}
 
 export interface AllocationDetail {
   addr: number;

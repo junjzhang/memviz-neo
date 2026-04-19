@@ -1,5 +1,5 @@
-import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation, FrameRecord } from "../types/snapshot";
-import type { TimelineData, TimelineBlock } from "../types/timeline";
+import type { RankSummary, SegmentInfo, TopAllocation, FrameRecord } from "../types/snapshot";
+import type { TimelineData, TimelineAlloc } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 
 /**
@@ -56,11 +56,10 @@ export interface FlameData {
 
 export interface RankData {
   summary: RankSummary;
-  treemap: TreemapNode;
   segments: SegmentInfo[];
   topAllocations: TopAllocation[];
   timeline: TimelineData;
-  timelineBlocks: TimelineBlock[];
+  timelineAllocs: TimelineAlloc[];
   anomalies: Anomaly[];
   // Pre-packed GPU buffer for WebGL instanced rendering.
   // 7 floats per strip: (t_start, t_end, y_offset, height, r, g, b)
@@ -80,8 +79,7 @@ export interface RankData {
   /** Per-segment allocator row data for the SegmentTimeline view. Sorted
    *  by totalSize desc so the biggest cached segments render on top. */
   segmentRows: SegmentRow[];
-  /** Flame graph: call-stack → memory pressure aggregate. Replaces the
-   *  old Treemap. */
+  /** Flame graph: call-stack → memory pressure aggregate. */
   flame: FlameData;
   // Interned frame records and stacks (stacks point into framePool).
   // Any top_frame_idx / source_idx in segments / blocks / allocations /

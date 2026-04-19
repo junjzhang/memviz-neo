@@ -25,16 +25,6 @@ export interface RankSummary {
   gc_threshold?: number;
 }
 
-export interface TreemapNode {
-  name: string;
-  size: number;
-  children?: TreemapNode[];
-  address?: number;
-  state?: string;
-  /** Index into RankData.framePool; -1 if unknown. */
-  top_frame_idx?: number;
-}
-
 export interface BlockInfo {
   address: number;
   size: number;

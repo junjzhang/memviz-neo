@@ -30,9 +30,8 @@ self.onmessage = (e: MessageEvent) => {
   if (type === "layout") {
     const { rank, ir } = e.data as { rank: number; ir: string };
     try {
-      // Parse the summary out of the IR without running the full
-      // polygon layout / treemap / strip packing. Summary is a tiny
-      // slice of the IR JSON and is all main needs during load.
+      // Only pull `summary` out of the IR during load — it's tiny and
+      // is all the main thread needs to render the rank selector.
       const t0 = performance.now();
       const raw = JSON.parse(ir);
       const summary = raw.summary;

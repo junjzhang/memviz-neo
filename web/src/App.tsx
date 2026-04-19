@@ -108,12 +108,8 @@ function Empty({ label = "No data" }: { label?: string }) {
   );
 }
 
-/**
- * MultiRank section re-renders every time a new rank lands during load
- * (progressive flush updates `multiRankOverview`). Isolate it as its own
- * subscriber so the rest of the dashboard — timeline, treemap, anomaly
- * panel, top allocations — is untouched by those flushes.
- */
+// Isolated subscriber: MultiRank re-renders on every progressive rank
+// flush, but the rest of the dashboard shouldn't.
 function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
   const currentRank = useDataStore((s) => s.currentRank);
   const allRanks = useFileStore((s) => s.ranks);
@@ -155,9 +151,8 @@ function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void 
 }
 
 function Dashboard() {
-  // Stable-ish subscriptions — these only change on rank switch, not on
-  // progressive load flushes. multiRankOverview + allRanks are read
-  // inside MultiRankSection so they don't re-render the whole dashboard.
+  // These selectors change on rank switch only, not on progressive load
+  // flushes (ranks + completedCount live in MultiRankSection).
   const flame = useDataStore((s) => s.flame);
   const framePool = useDataStore((s) => s.framePool);
   const topAllocations = useDataStore((s) => s.topAllocations);
@@ -165,7 +160,7 @@ function Dashboard() {
   const eventTimes = useDataStore((s) => s.eventTimes);
   const segments = useDataStore((s) => s.segments);
   const timeline = useDataStore((s) => s.timeline);
-  const timelineBlocks = useDataStore((s) => s.timelineBlocks);
+  const timelineAllocs = useDataStore((s) => s.timelineAllocs);
   const anomalies = useDataStore((s) => s.anomalies);
   const segmentRows = useDataStore((s) => s.segmentRows);
   const currentRank = useDataStore((s) => s.currentRank);
@@ -181,16 +176,11 @@ function Dashboard() {
   const [gridRef, gridWidth] = useContainerWidth();
   const halfWidth = gridWidth > 0 ? Math.floor((gridWidth - 32) / 2) : 600;
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
-  // Timeline fills most of the viewport so the memory plot itself —
-  // the primary investigation surface — gets the room. Secondary views
-  // sit below and the user scrolls.
   const tlHeight = useViewportHeight(560, 220);
 
-  // Shared pan/zoom view range. PhaseTimeline and SegmentTimeline both
-  // read/write this ref every frame — whoever pans either view, the
-  // other follows automatically with zero React re-renders. Units
-  // follow xAxisMode: time = absolute μs (time-normalized in child
-  // code), event = position in eventTimes array.
+  // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
+  // read/write every frame so they follow each other without re-renders.
+  // Units track xAxisMode: μs in time mode, event index in event mode.
   const viewRangeRef = useRef<[number, number]>([0, 1]);
   useEffect(() => {
     if (!timeline) return;
@@ -231,7 +221,7 @@ function Dashboard() {
               <>
                 <span className="mono hl">{rankTag}</span>
                 <span className="mono faint" style={{ marginLeft: 12 }}>
-                  {timelineBlocks.length} blocks
+                  {timelineAllocs.length} allocs
                 </span>
               </>
             }
@@ -239,7 +229,7 @@ function Dashboard() {
             {timeline && tlWidth > 0 ? (
               <PhaseTimeline
                 data={timeline}
-                blocks={timelineBlocks}
+                allocs={timelineAllocs}
                 anomalies={anomalies}
                 width={tlWidth}
                 height={tlHeight}

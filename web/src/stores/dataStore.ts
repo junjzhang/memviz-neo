@@ -1,14 +1,13 @@
 import { create } from "zustand";
 import type {
   RankSummary,
-  TreemapNode,
   SegmentInfo,
   TopAllocation,
   FrameRecord,
 } from "../types/snapshot";
 import type {
   TimelineData,
-  TimelineBlock,
+  TimelineAlloc,
   AllocationDetail,
 } from "../types/timeline";
 import type { RankData, Anomaly, SegmentRow, FlameData } from "../compute";
@@ -23,11 +22,10 @@ import { getActivePool } from "./fileStore";
 interface DataState {
   currentRank: number;
   summary: RankSummary | null;
-  treemap: TreemapNode | null;
   segments: SegmentInfo[];
   topAllocations: TopAllocation[];
   timeline: TimelineData | null;
-  timelineBlocks: TimelineBlock[];
+  timelineAllocs: TimelineAlloc[];
   anomalies: Anomaly[];
   framePool: FrameRecord[];
   timelineStripBuffer: Float32Array | null;
@@ -67,11 +65,10 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
   return {
     currentRank: rank,
     summary: data.summary,
-    treemap: data.treemap,
     segments: data.segments,
     topAllocations: data.topAllocations,
     timeline: data.timeline,
-    timelineBlocks: data.timelineBlocks,
+    timelineAllocs: data.timelineAllocs,
     anomalies: data.anomalies,
     framePool: data.framePool,
     timelineStripBuffer: data.stripBuffer,
@@ -91,11 +88,10 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
 const emptyState: Partial<DataState> = {
   currentRank: 0,
   summary: null,
-  treemap: null,
   segments: [],
   topAllocations: [],
   timeline: null,
-  timelineBlocks: [],
+  timelineAllocs: [],
   anomalies: [],
   framePool: [],
   timelineStripBuffer: null,
@@ -117,11 +113,10 @@ let inflight: { rank: number; promise: Promise<void> } | null = null;
 export const useDataStore = create<DataState>((set, get) => ({
   currentRank: 0,
   summary: null,
-  treemap: null,
   segments: [],
   topAllocations: [],
   timeline: null,
-  timelineBlocks: [],
+  timelineAllocs: [],
   anomalies: [],
   framePool: [],
   timelineStripBuffer: null,
