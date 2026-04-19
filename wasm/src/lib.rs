@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use serde_pickle::value::HashableValue;
-use serde_pickle::Value;
+
+mod pickle;
+
+use pickle::{Value as RcValue, ValueRc};
 
 // ---- Data structures ----
 
@@ -71,100 +73,104 @@ struct Block {
     top_frame_idx: u32,
 }
 
-// ---- Pickle value helpers ----
+// ---- Pickle walker ----
+//
+// Walks the Rc<Value> tree produced by pickle::parse. Values are shared
+// via Rc so MEMOIZE/BINGET in the PyTorch snapshot pickle (which interns
+// the frames list thousands of times) cost one Rc increment each, not a
+// deep copy.
 
-type Dict = BTreeMap<HashableValue, Value>;
+type DictCell = std::cell::RefCell<Vec<(ValueRc, ValueRc)>>;
 
-fn dict_get<'a>(d: &'a Dict, key: &str) -> Option<&'a Value> {
-    d.get(&HashableValue::String(key.to_string()))
+fn rd_str(d: &DictCell, k: &str) -> String {
+    pickle::dict_get(d, k).map(|v| pickle::to_str_rc(&v).to_string()).unwrap_or_default()
+}
+fn rd_int(d: &DictCell, k: &str) -> i64 {
+    pickle::dict_get(d, k).map(|v| pickle::to_int(&v)).unwrap_or(0)
 }
 
-fn val_str(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
-        _ => String::new(),
+fn intern_frames(d: &DictCell, pools: &mut Pools) -> u32 {
+    let mut indices: Vec<u32> = Vec::new();
+    if let Some(frames_v) = pickle::dict_get(d, "frames") {
+        pickle::with_list_items(&frames_v, |item| {
+            if let Some(fd) = pickle::as_dict(item) {
+                let frame = Frame {
+                    name: rd_str(fd, "name"),
+                    filename: rd_str(fd, "filename"),
+                    line: rd_int(fd, "line"),
+                };
+                indices.push(pools.intern_frame(frame));
+            }
+        });
     }
-}
-
-fn val_int(v: &Value) -> i64 {
-    match v {
-        Value::I64(n) => *n,
-        Value::F64(n) => *n as i64,
-        Value::Bool(b) => if *b { 1 } else { 0 },
-        _ => 0,
-    }
-}
-
-fn dstr(d: &Dict, k: &str) -> String { dict_get(d, k).map(val_str).unwrap_or_default() }
-fn dint(d: &Dict, k: &str) -> i64 { dict_get(d, k).map(val_int).unwrap_or(0) }
-
-fn dlist<'a>(d: &'a Dict, k: &str) -> &'a [Value] {
-    match dict_get(d, k) {
-        Some(Value::List(l)) => l, Some(Value::Tuple(l)) => l, _ => &[],
-    }
-}
-
-fn as_dict(v: &Value) -> Option<&Dict> {
-    match v { Value::Dict(d) => Some(d), _ => None }
-}
-
-/// Parse the "frames" list of a dict into interned frame indices, then
-/// return a single stack index into the stack pool.
-fn intern_frames(d: &Dict, pools: &mut Pools) -> u32 {
-    let indices: Vec<u32> = dlist(d, "frames").iter().filter_map(|v| {
-        let fd = as_dict(v)?;
-        let frame = Frame {
-            name: dstr(fd, "name"),
-            filename: dstr(fd, "filename"),
-            line: dint(fd, "line"),
-        };
-        Some(pools.intern_frame(frame))
-    }).collect();
     pools.intern_stack(indices)
 }
-
-// ---- Pickle parsing ----
 
 fn parse_snapshot(
     data: &[u8],
     pools: &mut Pools,
 ) -> (Vec<Segment>, Vec<(String, i64, i64, i64, i64, u32)>) {
-    let opts = serde_pickle::DeOptions::new().replace_recursive_structures();
-    let val: Value = serde_pickle::from_slice(data, opts).expect("pickle parse failed");
-    let root = as_dict(&val).expect("root not dict");
+    let root = pickle::parse(data).expect("pickle parse failed");
+    let root_dict = pickle::as_dict(&root).expect("root not a dict");
 
-    let segments: Vec<Segment> = dlist(root, "segments").iter().filter_map(|sv| {
-        let sd = as_dict(sv)?;
-        let blocks = dlist(sd, "blocks").iter().filter_map(|bv| {
-            let bd = as_dict(bv)?;
-            let stack_idx = intern_frames(bd, pools);
-            let top_frame_idx = resolve_top_frame_from_stack(stack_idx, pools);
-            Some(Block {
-                address: dint(bd, "address"),
-                size: dint(bd, "size"),
-                state: dstr(bd, "state"),
-                top_frame_idx,
-            })
-        }).collect();
-        Some(Segment {
-            address: dint(sd, "address"), total_size: dint(sd, "total_size"),
-            allocated_size: dint(sd, "allocated_size"), active_size: dint(sd, "active_size"),
-            segment_type: dstr(sd, "segment_type"), blocks,
-        })
-    }).collect();
+    let mut segments: Vec<Segment> = Vec::new();
+    if let Some(segs_v) = pickle::dict_get(root_dict, "segments") {
+        pickle::with_list_items(&segs_v, |sv| {
+            let sd = match pickle::as_dict(sv) { Some(d) => d, None => return };
+            let mut blocks: Vec<Block> = Vec::new();
+            if let Some(bs_v) = pickle::dict_get(sd, "blocks") {
+                pickle::with_list_items(&bs_v, |bv| {
+                    let bd = match pickle::as_dict(bv) { Some(d) => d, None => return };
+                    let stack_idx = intern_frames(bd, pools);
+                    let top_frame_idx = resolve_top_frame_from_stack(stack_idx, pools);
+                    blocks.push(Block {
+                        address: rd_int(bd, "address"),
+                        size: rd_int(bd, "size"),
+                        state: rd_str(bd, "state"),
+                        top_frame_idx,
+                    });
+                });
+            }
+            segments.push(Segment {
+                address: rd_int(sd, "address"),
+                total_size: rd_int(sd, "total_size"),
+                allocated_size: rd_int(sd, "allocated_size"),
+                active_size: rd_int(sd, "active_size"),
+                segment_type: rd_str(sd, "segment_type"),
+                blocks,
+            });
+        });
+    }
 
-    // Flatten device_traces — device index used to disambiguate addresses across GPUs
-    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::new(); // (action, device_addr_key, size, time_us, raw_addr, stack_idx)
-    for (dev_idx, dt) in dlist(root, "device_traces").iter().enumerate() {
-        let evs = match dt { Value::List(l) => l.as_slice(), Value::Tuple(l) => l.as_slice(), _ => continue };
-        for ev in evs {
-            let ed = match as_dict(ev) { Some(d) => d, None => continue };
-            if dict_get(ed, "addr").is_none() { continue; }
-            let addr = dint(ed, "addr");
-            let device_addr = (dev_idx as i64) << 48 | (addr & 0x0000_FFFF_FFFF_FFFF);
-            let stack_idx = intern_frames(ed, pools);
-            traces.push((dstr(ed, "action"), device_addr, dint(ed, "size"), dint(ed, "time_us"), addr, stack_idx));
+    // device_traces — flatten, keep only events with "addr". Device index
+    // disambiguates addresses across GPUs (shifted into the high bits of
+    // the key used for alloc/free pairing).
+    let mut traces: Vec<(String, i64, i64, i64, i64, u32)> = Vec::new();
+    if let Some(dt_v) = pickle::dict_get(root_dict, "device_traces") {
+        let outer_cell = match dt_v.as_ref() {
+            RcValue::List(cell) => Some(cell),
+            _ => None,
+        };
+        if let Some(outer_cell) = outer_cell {
+            for (dev_idx_usize, dev) in outer_cell.borrow().iter().enumerate() {
+                let dev_idx = dev_idx_usize as i64;
+                let evs_cell = match pickle::as_list(dev) { Some(c) => c, None => continue };
+                for ev in evs_cell.borrow().iter() {
+                    let ed = match pickle::as_dict(ev) { Some(d) => d, None => continue };
+                    if pickle::dict_get(ed, "addr").is_none() { continue; }
+                    let addr = rd_int(ed, "addr");
+                    let device_addr = (dev_idx << 48) | (addr & 0x0000_FFFF_FFFF_FFFF);
+                    let stack_idx = intern_frames(ed, pools);
+                    traces.push((
+                        rd_str(ed, "action"),
+                        device_addr,
+                        rd_int(ed, "size"),
+                        rd_int(ed, "time_us"),
+                        addr,
+                        stack_idx,
+                    ));
+                }
+            }
         }
     }
     traces.sort_by_key(|t| t.3);
@@ -180,7 +186,6 @@ fn parse_snapshot(
 ///   else NO_FRAME.
 fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
     let stack = &pools.stack_pool[stack_idx as usize];
-    // first .py
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
         if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
@@ -190,7 +195,6 @@ fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
             return fidx;
         }
     }
-    // fallback: first non-internal
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
         if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
@@ -250,56 +254,6 @@ fn build_allocations(
     (allocs, t_min, t_max, peak)
 }
 
-// ---- Polygon layout ----
-
-fn build_layout(allocs: &[Allocation], t_max: i64, limit: usize) -> (Vec<usize>, Vec<[i64; 4]>) {
-    let mut idx: Vec<usize> = (0..allocs.len()).collect();
-    idx.sort_by(|&a, &b| allocs[b].size.cmp(&allocs[a].size));
-    idx.truncate(limit);
-    let n = idx.len();
-    if n == 0 { return (idx, vec![]); }
-
-    let mut events: Vec<(i64, u8, usize, i64)> = Vec::with_capacity(n * 2);
-    for (li, &ai) in idx.iter().enumerate() {
-        let a = &allocs[ai];
-        events.push((a.alloc_us, 1, li, a.size));
-        if a.free_us != -1 { events.push((a.free_us, 0, li, a.size)); }
-    }
-    events.sort();
-
-    let mut sk_id: Vec<usize> = Vec::with_capacity(n);
-    let mut sk_sz: Vec<i64> = Vec::with_capacity(n);
-    let mut pos = vec![usize::MAX; n];
-    let mut t_st = vec![0i64; n];
-    let mut y = vec![0i64; n];
-    let mut act = vec![false; n];
-    let mut stot: i64 = 0;
-    let mut out: Vec<[i64; 4]> = Vec::new();
-
-    for &(time, et, li, sz) in &events {
-        if et == 1 {
-            y[li] = stot; t_st[li] = time; pos[li] = sk_id.len();
-            sk_id.push(li); sk_sz.push(sz); act[li] = true; stot += sz;
-        } else {
-            let p = pos[li]; if p == usize::MAX { continue; }
-            if t_st[li] < time { out.push([li as i64, t_st[li], time, y[li]]); }
-            act[li] = false; pos[li] = usize::MAX;
-            let freed = sk_sz[p];
-            sk_id.remove(p); sk_sz.remove(p); stot -= freed;
-            for i in p..sk_id.len() {
-                let ai = sk_id[i]; pos[ai] = i;
-                let oy = y[ai];
-                if t_st[ai] < time { out.push([ai as i64, t_st[ai], time, oy]); }
-                t_st[ai] = time; y[ai] = oy - freed;
-            }
-        }
-    }
-    for li in 0..n {
-        if act[li] && t_st[li] < t_max { out.push([li as i64, t_st[li], t_max, y[li]]); }
-    }
-    (idx, out)
-}
-
 // ---- JSON output helpers ----
 
 fn json_str(s: &str) -> String {
@@ -323,13 +277,26 @@ fn emit_frame_idx(buf: &mut String, idx: u32) {
 
 // ---- WASM entry ----
 
+/// Parse pickle, intern frames/stacks, pair alloc/free events, and emit
+/// an Intermediate Representation (IR) JSON that the main thread hands
+/// off to layout workers. Polygon layout runs in pure JS on the layout
+/// worker so the N-layout-worker WASM footprint is zero (JS heap is GC'd,
+/// unlike WASM linear memory which is grow-only).
 #[wasm_bindgen]
-pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
+pub fn parse_intern(data: &[u8], rank: i32, layout_limit: i32) -> String {
     let mut pools = Pools::new();
     let (segments, traces) = parse_snapshot(data, &mut pools);
     let (allocs, t_min, t_max, peak) = build_allocations(&traces, &pools);
-    let (top_idx, strips) = build_layout(&allocs, t_max, layout_limit as usize);
-    let n = top_idx.len();
+
+    // Pick top-N by size. Tie-break on alloc_us then addr to keep output
+    // deterministic when multiple allocations share a size.
+    let mut top_idx: Vec<usize> = (0..allocs.len()).collect();
+    top_idx.sort_by(|&a, &b| {
+        allocs[b].size.cmp(&allocs[a].size)
+            .then_with(|| allocs[a].alloc_us.cmp(&allocs[b].alloc_us))
+            .then_with(|| allocs[a].addr.cmp(&allocs[b].addr))
+    });
+    top_idx.truncate(layout_limit as usize);
 
     let mut j = String::with_capacity(2 * 1024 * 1024);
     j.push('{');
@@ -343,8 +310,7 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     j.push_str(&format!("\"summary\":{{\"rank\":{rank},\"total_reserved\":{tr},\"total_allocated\":{ta},\"total_active\":{tac},\"segment_count\":{sc},\"block_count\":{bc},\"active_bytes\":{ab},\"inactive_bytes\":{ib}}},"));
     j.push_str(&format!("\"timeline\":{{\"time_min\":{t_min},\"time_max\":{t_max},\"peak_bytes\":{peak},\"allocation_count\":{}}},", allocs.len()));
 
-    // ---- Interned frame pool ----
-    // Shape: frame_pool = [[name, filename, line], ...]
+    // Interned frame pool: [[name, filename, line], ...]
     j.push_str("\"frame_pool\":[");
     for (i, f) in pools.frame_pool.iter().enumerate() {
         if i > 0 { j.push(','); }
@@ -352,8 +318,7 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // ---- Interned stack pool ----
-    // Shape: stack_pool = [[frame_idx, frame_idx, ...], ...]
+    // Interned stack pool: [[frame_idx, ...], ...]
     j.push_str("\"stack_pool\":[");
     for (i, stk) in pools.stack_pool.iter().enumerate() {
         if i > 0 { j.push(','); }
@@ -366,35 +331,7 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Blocks with strips. top_frame_idx replaces the inline top_frame string.
-    j.push_str("\"blocks\":[");
-    let mut strips_per: Vec<Vec<&[i64; 4]>> = vec![vec![]; n];
-    for s in &strips { strips_per[s[0] as usize].push(s); }
-
-    for i in 0..n {
-        let a = &allocs[top_idx[i]];
-        if i > 0 { j.push(','); }
-        let free_us = if a.free_us == -1 { t_max } else { a.free_us };
-        let alive = a.free_us == -1;
-        j.push_str("{\"addr\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", a.addr));
-        j.push_str(",\"size\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", a.size));
-        j.push_str(",\"alloc_us\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", a.alloc_us));
-        j.push_str(",\"free_requested_us\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", a.free_requested_us));
-        j.push_str(",\"free_us\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", free_us));
-        j.push_str(",\"alive\":"); j.push_str(if alive { "true" } else { "false" });
-        j.push_str(",\"top_frame_idx\":"); emit_frame_idx(&mut j, a.top_frame_idx);
-        j.push_str(",\"idx\":"); let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", i));
-        j.push_str(",\"strips\":[");
-        for (si, s) in strips_per[i].iter().enumerate() {
-            if si > 0 { j.push(','); }
-            j.push_str(&format!("{{\"t_start\":{},\"t_end\":{},\"y_offset\":{}}}", s[1], s[2], s[3]));
-        }
-        j.push_str("]}");
-    }
-    j.push_str("],");
-
-    // Segments for treemap / address map. top_frame_idx replaces the
-    // inline top_frame string per block.
+    // Segments for treemap / address map.
     j.push_str("\"segments\":[");
     for (si, s) in segments.iter().enumerate() {
         if si > 0 { j.push(','); }
@@ -411,15 +348,15 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Alloc details — only the top_idx allocations. Each carries just
-    // scalars + stack_idx now; frames resolve via pool lookup on the JS
-    // side (getDetail) instead of inlining 70 frame dicts per entry.
-    j.push_str("\"alloc_details\":[");
+    // Top-N allocations: layout-worker input. Each entry carries the
+    // minimum scalars needed for polygon layout, strip packing, anomaly
+    // detection, and detail panel resolution (via stack_idx -> stack_pool).
+    j.push_str("\"top_allocations\":[");
     for (i, &ai) in top_idx.iter().enumerate() {
         let a = &allocs[ai];
         if i > 0 { j.push(','); }
-        j.push_str(&format!("{{\"addr\":{},\"size\":{},\"alloc_us\":{},\"free_requested_us\":{},\"free_us\":{},\"top_frame_idx\":",
-            a.addr, a.size, a.alloc_us, a.free_requested_us, a.free_us));
+        j.push_str(&format!("{{\"idx\":{},\"addr\":{},\"size\":{},\"alloc_us\":{},\"free_requested_us\":{},\"free_us\":{},\"top_frame_idx\":",
+            i, a.addr, a.size, a.alloc_us, a.free_requested_us, a.free_us));
         emit_frame_idx(&mut j, a.top_frame_idx);
         j.push_str(",\"stack_idx\":");
         let _ = std::fmt::Write::write_fmt(&mut j, format_args!("{}", a.stack_idx));

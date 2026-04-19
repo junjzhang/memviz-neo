@@ -1,11 +1,8 @@
-// Pure parse: WASM JSON output → RankData. Runs inside Web Workers so the
-// main thread never blocks on JSON.parse, treemap building, anomaly
-// detection, or Float32 strip packing. No DOM / WebGL imports allowed here.
-//
-// Post-P0: WASM emits interned frame_pool + stack_pool and every reference
-// (block top_frame, alloc top_frame, stack trace) is a u32 index. Parsing
-// is now an index-plumbing exercise — no frame strings duplicated per
-// allocation.
+// Layout-worker entry: takes the Rust-emitted IR JSON (frames/stack
+// pools, segments, top-N allocations) and produces the final RankData
+// the main thread renders. Polygon layout runs here in pure JS so the
+// N layout workers never touch WASM — their JS heap is GC'd, unlike
+// WASM linear memory which is grow-only.
 
 import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation, FrameRecord } from "../types/snapshot";
 import type { TimelineBlock } from "../types/timeline";
@@ -19,11 +16,20 @@ export interface ParseResult {
   data: RankData;
 }
 
+interface TopAllocIR {
+  idx: number;
+  addr: number;
+  size: number;
+  alloc_us: number;
+  free_requested_us: number;
+  free_us: number; // -1 if alive
+  top_frame_idx: number;
+  stack_idx: number;
+}
+
 function formatTopFrame(idx: number, framePool: FrameRecord[]): string {
   if (idx < 0 || idx >= framePool.length) return "";
   const f = framePool[idx];
-  // Match the old Rust top_frame formatter: "name @ basename:line" for .py,
-  // else just a trimmed name. Used only for UI display / treemap labels.
   const name = f.name.split("(")[0].split("<")[0].trim();
   if (f.filename.includes(".py")) {
     const slash = f.filename.lastIndexOf("/");
@@ -33,8 +39,116 @@ function formatTopFrame(idx: number, framePool: FrameRecord[]): string {
   return name.length > 60 ? name.slice(0, 57) + "..." : name;
 }
 
-export function parseRank(json: string, _rank: number): ParseResult {
-  const raw = JSON.parse(json);
+// Port of the Rust build_layout (removed from WASM). O(N²) over top-N.
+// Output: flat array of [li, t_start, t_end, y_offset] quadruples.
+function buildLayout(allocs: TopAllocIR[], tMax: number): Float64Array {
+  const n = allocs.length;
+  if (n === 0) return new Float64Array(0);
+
+  // Event list: (time, et, li, size). et=1 alloc, et=0 free.
+  const evCap = n * 2;
+  const evTime = new Float64Array(evCap);
+  const evEt = new Uint8Array(evCap);
+  const evLi = new Int32Array(evCap);
+  const evSz = new Float64Array(evCap);
+  let evN = 0;
+  for (let li = 0; li < n; li++) {
+    const a = allocs[li];
+    evTime[evN] = a.alloc_us; evEt[evN] = 1; evLi[evN] = li; evSz[evN] = a.size; evN++;
+    if (a.free_us !== -1) {
+      evTime[evN] = a.free_us; evEt[evN] = 0; evLi[evN] = li; evSz[evN] = a.size; evN++;
+    }
+  }
+  // Sort by time asc, then et asc so frees at equal time come first
+  // (matches Rust's tuple-sort of (time, et, ...) where free=0, alloc=1).
+  const order = new Int32Array(evN);
+  for (let i = 0; i < evN; i++) order[i] = i;
+  const orderArr = Array.from(order);
+  orderArr.sort((a, b) => {
+    const d = evTime[a] - evTime[b];
+    if (d !== 0) return d;
+    return evEt[a] - evEt[b];
+  });
+
+  // Stack of live ids + sizes, parallel arrays. pos[li] = index into stack or -1.
+  const skId: number[] = new Array(n);
+  const skSz: number[] = new Array(n);
+  let skLen = 0;
+  const pos = new Int32Array(n).fill(-1);
+  const tSt = new Float64Array(n);
+  const y = new Float64Array(n);
+  const act = new Uint8Array(n);
+  let stot = 0;
+
+  // Output grows; size unknown upfront. Use plain array and flatten.
+  const outLi: number[] = [];
+  const outTs: number[] = [];
+  const outTe: number[] = [];
+  const outYo: number[] = [];
+
+  for (let k = 0; k < evN; k++) {
+    const i = orderArr[k];
+    const time = evTime[i];
+    const et = evEt[i];
+    const li = evLi[i];
+    const sz = evSz[i];
+    if (et === 1) {
+      y[li] = stot;
+      tSt[li] = time;
+      pos[li] = skLen;
+      skId[skLen] = li;
+      skSz[skLen] = sz;
+      skLen++;
+      act[li] = 1;
+      stot += sz;
+    } else {
+      const p = pos[li];
+      if (p === -1) continue;
+      if (tSt[li] < time) {
+        outLi.push(li); outTs.push(tSt[li]); outTe.push(time); outYo.push(y[li]);
+      }
+      act[li] = 0;
+      pos[li] = -1;
+      const freed = skSz[p];
+      // Shift down (array splice at p).
+      for (let j = p; j < skLen - 1; j++) {
+        skId[j] = skId[j + 1];
+        skSz[j] = skSz[j + 1];
+      }
+      skLen--;
+      stot -= freed;
+      // Update positions + emit closing strips + shift y down by freed.
+      for (let j = p; j < skLen; j++) {
+        const ai = skId[j];
+        pos[ai] = j;
+        const oy = y[ai];
+        if (tSt[ai] < time) {
+          outLi.push(ai); outTs.push(tSt[ai]); outTe.push(time); outYo.push(oy);
+        }
+        tSt[ai] = time;
+        y[ai] = oy - freed;
+      }
+    }
+  }
+  // Close any still-live strips to t_max.
+  for (let li = 0; li < n; li++) {
+    if (act[li] && tSt[li] < tMax) {
+      outLi.push(li); outTs.push(tSt[li]); outTe.push(tMax); outYo.push(y[li]);
+    }
+  }
+  const m = outLi.length;
+  const flat = new Float64Array(m * 4);
+  for (let i = 0; i < m; i++) {
+    flat[i * 4] = outLi[i];
+    flat[i * 4 + 1] = outTs[i];
+    flat[i * 4 + 2] = outTe[i];
+    flat[i * 4 + 3] = outYo[i];
+  }
+  return flat;
+}
+
+export function parseRank(irJson: string, _rank: number): ParseResult {
+  const raw = JSON.parse(irJson);
   const summary: RankSummary = raw.summary;
 
   // ---- Frame / stack pools ----
@@ -47,8 +161,13 @@ export function parseRank(json: string, _rank: number): ParseResult {
   const rawStackPool: number[][] = raw.stack_pool || [];
   const stackPool: Uint32Array[] = rawStackPool.map((arr) => Uint32Array.from(arr));
 
-  // ---- Allocations (worker-local, used only for anomaly detection below) ----
-  const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => ({
+  // ---- Top-N allocations (IR) ----
+  const topAllocsIR: TopAllocIR[] = raw.top_allocations || [];
+  const timeMin: number = raw.timeline.time_min;
+  const timeMax: number = raw.timeline.time_max;
+
+  // ---- Anomaly detection over the top-N (same cohort the UI surfaces) ----
+  const allocations: Allocation[] = topAllocsIR.map((a) => ({
     addr: a.addr,
     size: a.size,
     alloc_us: a.alloc_us,
@@ -57,10 +176,9 @@ export function parseRank(json: string, _rank: number): ParseResult {
     top_frame_idx: a.top_frame_idx,
     stack_idx: a.stack_idx,
   }));
-  const anomalies: Anomaly[] = detectAnomalies(allocations, raw.timeline.time_max);
+  const anomalies: Anomaly[] = detectAnomalies(allocations, timeMax);
 
-  // stackByAddr index so the main thread can resolve a detail panel's
-  // stack without another worker round-trip. Small: top 3000 addrs × ~24B.
+  // stackByAddr index for sync main-thread detail resolution.
   const stackByAddr = new Map<
     number,
     { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }
@@ -75,7 +193,7 @@ export function parseRank(json: string, _rank: number): ParseResult {
     });
   }
 
-  // ---- Segments (treemap / address map / top allocations) ----
+  // ---- Segments (treemap / address map / top allocations for UI) ----
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
     address: s.address,
     total_size: s.total_size,
@@ -146,58 +264,57 @@ export function parseRank(json: string, _rank: number): ParseResult {
   };
   topAllocations.sort((a, b) => b.size - a.size);
 
-  // Pre-pack strip buffer for WebGL (time normalized vs data.time_min).
-  const rawBlocks = raw.blocks as {
-    addr: number;
-    size: number;
-    alloc_us: number;
-    free_requested_us: number;
-    free_us: number;
-    alive: boolean;
-    top_frame_idx: number;
-    idx: number;
-    strips: { t_start: number; t_end: number; y_offset: number }[];
-  }[];
-  const timeOrigin: number = raw.timeline.time_min;
-  let stripCount = 0;
-  let maxBytesFull = 0;
-  for (const b of rawBlocks) {
-    stripCount += b.strips.length;
-    for (const s of b.strips) {
-      const t = s.y_offset + b.size;
-      if (t > maxBytesFull) maxBytesFull = t;
-    }
+  // ---- Polygon layout + strip packing ----
+  const stripsFlat = buildLayout(topAllocsIR, timeMax);
+  const totalStrips = stripsFlat.length / 4;
+
+  // Bucket strips by allocation index so we can compute contiguous
+  // [offset, count] ranges per block when packing the Float32 buffer.
+  const stripsPerAlloc: number[][] = new Array(topAllocsIR.length);
+  for (let i = 0; i < topAllocsIR.length; i++) stripsPerAlloc[i] = [];
+  for (let s = 0; s < totalStrips; s++) {
+    const li = stripsFlat[s * 4] as number;
+    stripsPerAlloc[li].push(s);
   }
-  const stripBuffer = new Float32Array(stripCount * STRIP_FLOATS);
-  const timelineBlocks: TimelineBlock[] = new Array(rawBlocks.length);
-  let stripIdx = 0;
-  for (let bi = 0; bi < rawBlocks.length; bi++) {
-    const block = rawBlocks[bi];
-    const [r, g, bl] = STRIP_PALETTE_RGB[block.idx % STRIP_PALETTE_RGB.length];
-    const sz = block.size;
-    const startStripIdx = stripIdx;
-    for (const strip of block.strips) {
-      const off = stripIdx * STRIP_FLOATS;
-      stripBuffer[off] = strip.t_start - timeOrigin;
-      stripBuffer[off + 1] = strip.t_end - timeOrigin;
-      stripBuffer[off + 2] = strip.y_offset;
+
+  const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
+  const timelineBlocks: TimelineBlock[] = new Array(topAllocsIR.length);
+  let maxBytesFull = 0;
+  let writeIdx = 0;
+  for (let i = 0; i < topAllocsIR.length; i++) {
+    const a = topAllocsIR[i];
+    const [r, g, bl] = STRIP_PALETTE_RGB[i % STRIP_PALETTE_RGB.length];
+    const sz = a.size;
+    const startStripIdx = writeIdx;
+    for (const s of stripsPerAlloc[i]) {
+      const tStart = stripsFlat[s * 4 + 1];
+      const tEnd = stripsFlat[s * 4 + 2];
+      const yOff = stripsFlat[s * 4 + 3];
+      const off = writeIdx * STRIP_FLOATS;
+      stripBuffer[off] = tStart - timeMin;
+      stripBuffer[off + 1] = tEnd - timeMin;
+      stripBuffer[off + 2] = yOff;
       stripBuffer[off + 3] = sz;
       stripBuffer[off + 4] = r;
       stripBuffer[off + 5] = g;
       stripBuffer[off + 6] = bl;
-      stripIdx++;
+      const top = yOff + sz;
+      if (top > maxBytesFull) maxBytesFull = top;
+      writeIdx++;
     }
-    timelineBlocks[bi] = {
-      addr: block.addr,
-      size: block.size,
-      alloc_us: block.alloc_us,
-      free_requested_us: block.free_requested_us,
-      free_us: block.free_us,
-      alive: block.alive,
-      top_frame_idx: block.top_frame_idx,
-      idx: block.idx,
+    const alive = a.free_us === -1;
+    const freeUs = alive ? timeMax : a.free_us;
+    timelineBlocks[i] = {
+      addr: a.addr,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_requested_us: a.free_requested_us,
+      free_us: freeUs,
+      alive,
+      top_frame_idx: a.top_frame_idx,
+      idx: i,
       stripOffset: startStripIdx,
-      stripCount: block.strips.length,
+      stripCount: stripsPerAlloc[i].length,
     };
   }
 
@@ -217,7 +334,7 @@ export function parseRank(json: string, _rank: number): ParseResult {
     timelineBlocks,
     anomalies,
     stripBuffer,
-    stripCount,
+    stripCount: totalStrips,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
     framePool,
     stackPool,

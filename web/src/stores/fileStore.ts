@@ -58,6 +58,7 @@ function extractRank(filename: string): number {
 }
 
 export const useFileStore = create<FileState>((set) => ({
+
   status: "idle",
   fileNames: [],
   progress: 0,
