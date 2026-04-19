@@ -12,7 +12,7 @@ import SegmentTimeline from "./views/SegmentTimeline";
 import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
 import { useRankSummaries } from "./stores/rankStore";
-import { useContainerWidth } from "./hooks/useContainerWidth";
+import { useContainerWidth, useViewportHeight } from "./hooks/useContainerWidth";
 
 export default function App() {
   const fileStatus = useFileStore((s) => s.status);
@@ -181,6 +181,10 @@ function Dashboard() {
   const [gridRef, gridWidth] = useContainerWidth();
   const halfWidth = gridWidth > 0 ? Math.floor((gridWidth - 32) / 2) : 600;
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
+  // Timeline fills most of the viewport so the memory plot itself —
+  // the primary investigation surface — gets the room. Secondary views
+  // sit below and the user scrolls.
+  const tlHeight = useViewportHeight(560, 220);
 
   // Shared pan/zoom view range. PhaseTimeline and SegmentTimeline both
   // read/write this ref every frame — whoever pans either view, the
@@ -238,7 +242,7 @@ function Dashboard() {
                 blocks={timelineBlocks}
                 anomalies={anomalies}
                 width={tlWidth}
-                height={520}
+                height={tlHeight}
                 currentRank={currentRank}
                 viewRangeRef={viewRangeRef}
               />

@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
+import { useRankSummaries } from "../stores/rankStore";
+import { formatBytes } from "../utils";
 
 export default function Layout({ children }: { children: ReactNode }) {
   const currentRank = useDataStore((s) => s.currentRank);
@@ -11,41 +13,28 @@ export default function Layout({ children }: { children: ReactNode }) {
   const setXAxisMode = useDataStore((s) => s.setXAxisMode);
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
+  const liveSummary = useRankSummaries((s) => s.summaries[currentRank]);
   const handleReset = () => {
     resetFiles();
     resetData();
   };
+
+  const peak = liveSummary?.peak_bytes ?? liveSummary?.active_bytes ?? 0;
+  const reserved = liveSummary?.total_reserved ?? 0;
+  const baseline = liveSummary ? Math.min(liveSummary.baseline ?? 0, peak) : 0;
+  const util = reserved > 0 ? ((peak / reserved) * 100).toFixed(0) : "—";
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <header className="app-header">
         <div className="app-header-left">
           <button
-            className="btn-ghost"
+            className="app-header-open"
             onClick={handleReset}
             title="Open another directory"
-            style={{
-              border: "1px solid var(--border)",
-              background: "transparent",
-              cursor: "pointer",
-              padding: "6px 10px",
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              color: "var(--fg-muted)",
-              letterSpacing: "0.08em",
-              textTransform: "uppercase",
-            }}
           >
             ← Open
           </button>
-          <div className="app-brand display">
-            memviz<span style={{ color: "var(--accent)" }}>/neo</span>
-          </div>
-          {hasData && (
-            <div className="rank-badge mono" title="Use Multi-Rank Overview below to switch">
-              R{String(currentRank).padStart(2, "0")}
-            </div>
-          )}
           {hasData && (
             <div className="axis-toggle mono" role="group" aria-label="Timeline X axis">
               <button
@@ -58,7 +47,7 @@ export default function Layout({ children }: { children: ReactNode }) {
               <button
                 className={xAxisMode === "event" ? "is-active" : ""}
                 onClick={() => setXAxisMode("event")}
-                title="X axis = alloc/free event ordinal — dense phases stretch out, idle gaps collapse"
+                title="X axis = alloc/free event ordinal — dense phases stretch, idle gaps collapse"
               >
                 event
               </button>
@@ -66,42 +55,71 @@ export default function Layout({ children }: { children: ReactNode }) {
           )}
         </div>
 
-        {/* Active / Inactive / Allocated / Util were moved to the
-            Multi-Rank hero card — don't duplicate here. Header holds
-            identifying state (rank) and one-per-dataset config
-            (allocator settings) flat so users can scan them at a
-            glance. */}
-        {summary && summary.alloc_conf !== undefined && (
-          <div className="app-header-stats">
-            <AllocStat
-              label="Expandable"
-              value={summary.expandable_segments ? "on" : "off"}
-              accent={summary.expandable_segments === true}
-            />
-            <div className="divider-v" />
-            <AllocStat
-              label="Max Split"
-              value={
-                summary.max_split_size !== undefined && summary.max_split_size >= 0
-                  ? `${summary.max_split_size} MB`
-                  : "unlimited"
-              }
-              dim={summary.max_split_size === undefined || summary.max_split_size < 0}
-            />
-            <div className="divider-v" />
-            <AllocStat
-              label="GC Threshold"
-              value={
-                summary.gc_threshold && summary.gc_threshold > 0
-                  ? summary.gc_threshold.toFixed(2)
-                  : "off"
-              }
-              dim={!summary.gc_threshold || summary.gc_threshold <= 0}
-            />
-            <div className="divider-v" />
-            <AllocConfStat value={summary.alloc_conf || ""} />
-          </div>
-        )}
+        {/* Right cluster: inline stats, mono, one line. No labels above
+            values — each fact is "key value" so a glance tells you
+            everything without scanning a grid. */}
+        <div className="app-header-right mono">
+          {hasData && (
+            <span className="hx hx-rank" title="Use Multi-Rank Overview below to switch">
+              <span className="hx-k">rank</span>
+              <span className="hx-v hl">R{String(currentRank).padStart(2, "0")}</span>
+            </span>
+          )}
+          {liveSummary && (
+            <>
+              <span className="hx">
+                <span className="hx-k">peak</span>
+                <span className="hx-v hl">{formatBytes(peak)}</span>
+              </span>
+              <span className="hx">
+                <span className="hx-k">reserved</span>
+                <span className="hx-v">{formatBytes(reserved)}</span>
+                <span className="hx-sub">{util}%</span>
+              </span>
+              {baseline > 0 && (
+                <span className="hx" title="pre-window baseline — allocations alive before the ring buffer window began">
+                  <span className="hx-k">baseline</span>
+                  <span className="hx-v">{formatBytes(baseline)}</span>
+                </span>
+              )}
+            </>
+          )}
+          {summary && summary.alloc_conf !== undefined && (
+            <>
+              <span className="hx-sep">·</span>
+              <span className={"hx" + (summary.expandable_segments ? " hx-on" : "")}>
+                <span className="hx-k">expandable</span>
+                <span className="hx-v">{summary.expandable_segments ? "on" : "off"}</span>
+              </span>
+              <span className="hx">
+                <span className="hx-k">split</span>
+                <span className="hx-v">
+                  {summary.max_split_size !== undefined && summary.max_split_size >= 0
+                    ? `${summary.max_split_size}MB`
+                    : "∞"}
+                </span>
+              </span>
+              <span className="hx">
+                <span className="hx-k">gc</span>
+                <span className="hx-v">
+                  {summary.gc_threshold && summary.gc_threshold > 0
+                    ? summary.gc_threshold.toFixed(2)
+                    : "off"}
+                </span>
+              </span>
+              {summary.alloc_conf && (
+                <span className="hx hx-conf" title={summary.alloc_conf}>
+                  <span className="hx-k">conf</span>
+                  <span className="hx-v">
+                    {summary.alloc_conf.length > 24
+                      ? summary.alloc_conf.slice(0, 23) + "…"
+                      : summary.alloc_conf}
+                  </span>
+                </span>
+              )}
+            </>
+          )}
+        </div>
       </header>
 
       <main>
@@ -131,41 +149,67 @@ export default function Layout({ children }: { children: ReactNode }) {
       <style>{`
         .app-header {
           display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: var(--s5);
-          padding: 20px var(--s6);
+          align-items: stretch;
+          padding: 0 var(--s6);
           background: var(--bg);
           border-bottom: 1px solid var(--divider);
           position: sticky;
           top: 0;
           z-index: 10;
           backdrop-filter: blur(8px);
+          min-height: 44px;
         }
+        /* Left = interactive controls: buttons + toggle. Distinct by
+           padding, border chrome, and a hard right rule that separates
+           it from the readout strip. */
         .app-header-left {
           display: flex;
           align-items: center;
-          gap: var(--s4);
+          gap: 10px;
+          flex: 0 0 auto;
+          padding-right: 16px;
+          border-right: 1px solid var(--border);
         }
-        .app-brand {
-          font-size: 18px;
-          font-weight: 600;
-          letter-spacing: -0.02em;
-          color: var(--fg);
+        /* Right = passive readout: mono chips, no hit targets, subtle
+           inset background so the eye reads it as a status strip. */
+        .app-header-right {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          padding-left: 16px;
+          font-size: 12px;
+          color: var(--fg-muted);
+          background: rgba(255,255,255,0.015);
+          flex: 1 1 auto;
         }
+        .app-header-open {
+          appearance: none;
+          border: 1px solid var(--border);
+          background: transparent;
+          cursor: pointer;
+          padding: 3px 8px;
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--fg-muted);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .app-header-open:hover { color: var(--fg); border-color: var(--border-strong); }
         .axis-toggle {
           display: inline-flex;
           align-items: stretch;
           border: 1px solid var(--border);
-          height: 26px;
+          height: 22px;
         }
         .axis-toggle button {
           appearance: none;
           background: transparent;
           border: none;
-          padding: 0 10px;
+          padding: 0 8px;
           font-family: var(--font-mono);
-          font-size: 11px;
+          font-size: 10px;
           letter-spacing: 0.08em;
           text-transform: uppercase;
           color: var(--fg-faint);
@@ -178,83 +222,28 @@ export default function Layout({ children }: { children: ReactNode }) {
         }
         .axis-toggle button + button { border-left: 1px solid var(--border); }
 
-        .rank-badge {
+        .hx {
           display: inline-flex;
-          align-items: center;
-          padding: 4px 10px;
-          font-size: 11px;
-          font-weight: 500;
-          letter-spacing: 0.1em;
-          color: var(--accent);
-          border: 1px solid var(--border-strong);
-          background: var(--accent-bg);
+          align-items: baseline;
+          gap: 4px;
+          white-space: nowrap;
         }
-        .app-header-stats {
-          display: flex;
-          align-items: stretch;
-          gap: var(--s5);
-        }
-        .hs-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-        .hs-label {
-          font-family: var(--font-display);
-          font-size: 9px;
-          letter-spacing: 0.14em;
-          text-transform: uppercase;
+        .hx-k {
+          font-size: 10px;
+          letter-spacing: 0.06em;
           color: var(--fg-faint);
+          text-transform: uppercase;
         }
-        .hs-value {
-          font-family: var(--font-mono);
-          font-size: 14px;
+        .hx-v {
+          font-size: 12px;
           color: var(--fg);
           font-variant-numeric: tabular-nums;
         }
-        .hs-value.hl { color: var(--accent); }
-        .hs-sub { font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); margin-left: 4px; }
-
+        .hx-v.hl { color: var(--accent); font-size: 13px; }
+        .hx-sub { font-size: 10px; color: var(--fg-faint); }
+        .hx-sep { color: var(--border-strong); user-select: none; }
+        .hx-on .hx-v { color: var(--accent); }
       `}</style>
-    </div>
-  );
-}
-
-function AllocStat({
-  label,
-  value,
-  accent,
-  dim,
-}: {
-  label: string;
-  value: string;
-  accent?: boolean;
-  dim?: boolean;
-}) {
-  return (
-    <div className="hs-item">
-      <div className="hs-label">{label}</div>
-      <div
-        className={"hs-value" + (accent ? " hl" : "")}
-        style={dim ? { color: "var(--fg-faint)" } : undefined}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function AllocConfStat({ value }: { value: string }) {
-  const display = value || "(unset)";
-  // Truncate long PYTORCH_CUDA_ALLOC_CONF strings; full text available
-  // via native tooltip.
-  const MAX = 40;
-  const shown = display.length > MAX ? display.slice(0, MAX - 1) + "…" : display;
-  return (
-    <div className="hs-item" title={display}>
-      <div className="hs-label">ALLOC_CONF</div>
-      <div
-        className="hs-value"
-        style={{ fontSize: 12, color: value ? "var(--fg)" : "var(--fg-faint)" }}
-      >
-        {shown}
-      </div>
     </div>
   );
 }

@@ -1,5 +1,4 @@
 import { memo, useCallback, useState } from "react";
-import type { RankSummary } from "../types/snapshot";
 import { formatBytes } from "../utils";
 import { useRankSummaries } from "../stores/rankStore";
 
@@ -18,21 +17,17 @@ interface HoverInfo { rank: number; x: number; y: number; }
 export default function MultiRank({ allRanks, currentRank, onSelectRank }: Props) {
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const maxPeak = useRankSummaries((s) => s.maxPeak);
-  const selectedSummary = useRankSummaries((s) => s.summaries[currentRank]);
 
   const handleLeave = useCallback(() => setHover(null), []);
   const handleHover = useCallback((info: HoverInfo) => setHover(info), []);
 
   if (allRanks.length === 0) return null;
 
+  // Per-rank stats for the currently-selected rank now live in the
+  // sticky header (Layout.tsx); here we just render the comparison
+  // strip so vertical space stays tight.
   return (
     <div>
-      {selectedSummary ? (
-        <HeroCard rank={selectedSummary} maxPeak={maxPeak} />
-      ) : (
-        <HeroPlaceholder rank={currentRank} />
-      )}
-
       <div className="mr-strip" onMouseLeave={handleLeave}>
         {allRanks.map((r) => (
           <Cell
@@ -149,138 +144,7 @@ function HoverTooltip({ rank, x }: { rank: number; x: number }) {
   );
 }
 
-function HeroCard({ rank, maxPeak }: { rank: RankSummary; maxPeak: number }) {
-  const peak = rank.peak_bytes ?? rank.active_bytes;
-  const baseline = Math.min(rank.baseline ?? 0, peak);
-  const windowDelta = Math.max(0, peak - baseline);
-  const baselinePct = (baseline / maxPeak) * 100;
-  const peakPct = (windowDelta / maxPeak) * 100;
-  const utilPct =
-    rank.total_reserved > 0
-      ? ((peak / rank.total_reserved) * 100).toFixed(1)
-      : "—";
-
-  return (
-    <div className="mr-hero">
-      <div className="mr-hero-rank">R{String(rank.rank).padStart(2, "0")}</div>
-
-      <div className="mr-hero-bar-wrap">
-        <div className="mr-hero-bar">
-          {baselinePct > 0 && (
-            <div
-              className="mr-hero-bar-baseline"
-              style={{ width: `${baselinePct}%` }}
-              title={`pre-window baseline · ${formatBytes(baseline)}`}
-            />
-          )}
-          <div className="mr-hero-bar-active" style={{ width: `${peakPct}%` }} />
-        </div>
-        <div className="mr-hero-bar-caption">
-          <span>peak vs max peak across ranks</span>
-          <span>{utilPct}% of reserved</span>
-        </div>
-      </div>
-
-      <Stat label="Peak" value={formatBytes(peak)} accent />
-      <Stat label="Baseline" value={formatBytes(baseline)} />
-      <Stat label="Active (end)" value={formatBytes(rank.active_bytes)} />
-      <Stat label="Reserved" value={formatBytes(rank.total_reserved)} />
-    </div>
-  );
-}
-
-function HeroPlaceholder({ rank }: { rank: number }) {
-  return (
-    <div className="mr-hero-placeholder">
-      <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
-      <span>
-        Rank {String(rank).padStart(2, "0")} — loading snapshot…
-      </span>
-    </div>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: boolean;
-}) {
-  return (
-    <div className="mr-stat">
-      <span className="mr-stat-label">{label}</span>
-      <span className={"mr-stat-value" + (accent ? " hl" : "")}>{value}</span>
-    </div>
-  );
-}
-
 const STYLES = `
-  .mr-hero {
-    display: grid;
-    grid-template-columns: auto 1fr auto auto auto auto;
-    gap: 32px;
-    align-items: center;
-    padding: 20px 24px;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-left: 2px solid var(--accent);
-    margin-bottom: 20px;
-  }
-  .mr-hero-placeholder {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 20px 24px;
-    background: var(--bg-elev);
-    border: 1px dashed var(--border-strong);
-    margin-bottom: 20px;
-    color: var(--fg-faint);
-    font-family: var(--font-mono);
-    font-size: 12px;
-  }
-  .mr-hero-rank {
-    font-family: var(--font-display);
-    font-size: 28px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    color: var(--accent);
-    line-height: 1;
-    min-width: 72px;
-  }
-  .mr-hero-bar-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 160px;
-  }
-  .mr-hero-bar {
-    height: 10px;
-    background: var(--bg);
-    display: flex;
-    overflow: hidden;
-  }
-  .mr-hero-bar-active { background: var(--accent); height: 100%; }
-  .mr-hero-bar-inactive { background: var(--border-strong); height: 100%; }
-  .mr-hero-bar-baseline {
-    height: 100%;
-    background:
-      repeating-linear-gradient(
-        45deg,
-        rgba(113,113,122,0.9) 0 2px,
-        rgba(63,63,70,0.9) 2px 5px
-      );
-  }
-  .mr-hero-bar-caption {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--fg-faint);
-    display: flex;
-    justify-content: space-between;
-  }
-
   .mr-strip {
     position: relative;
     display: flex;
