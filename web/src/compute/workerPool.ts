@@ -5,6 +5,7 @@
 
 // @ts-ignore — Vite handles this URL pattern for WASM
 import wasmUrl from "../../../wasm/pkg/memviz_wasm_bg.wasm?url";
+import type { RankData } from "./index";
 
 export interface WorkerTask {
   rank: number;
@@ -13,7 +14,7 @@ export interface WorkerTask {
 
 export interface WorkerResult {
   rank: number;
-  json: string;
+  data: RankData;
 }
 
 export type LoadPhase =
@@ -89,8 +90,8 @@ export function createWorkerPool(
 
       for (const worker of workers) {
         worker.onmessage = (e: MessageEvent) => {
-          const { type, rank, json, error } = e.data;
-          if (type === "result") onResult({ rank, json });
+          const { type, rank, data, error } = e.data;
+          if (type === "result") onResult({ rank, data });
           else if (type === "error") onError(rank, error);
           done(worker);
         };
