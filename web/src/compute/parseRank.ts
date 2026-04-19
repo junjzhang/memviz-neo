@@ -10,7 +10,7 @@ import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
 import type { Allocation, RankData } from "./index";
-import { STRIP_PALETTE_RGB } from "./palette";
+import { blockColor } from "./palette";
 
 export interface ParseResult {
   data: RankData;
@@ -283,17 +283,29 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
   const timelineBlocks: TimelineBlock[] = new Array(topAllocsIR.length);
-  let maxBytesFull = baseline;
+  // Strips are laid out above the pre-trace baseline, but we rebase to y=0 so
+  // the baseline doesn't eat chart vertical space. The baseline value is still
+  // surfaced as an axis annotation.
+  let maxBytesFull = 0;
   let writeIdx = 0;
+  // Per-hueKey instance counter so repeated allocs from the same call
+  // site get lightness-shifted shades in the same color family.
+  const instanceCount = new Map<number, number>();
   for (let i = 0; i < topAllocsIR.length; i++) {
     const a = topAllocsIR[i];
-    const [r, g, bl] = STRIP_PALETTE_RGB[i % STRIP_PALETTE_RGB.length];
+    // Prefer top_frame_idx for hue (user-code line); fall back to
+    // stack_idx when the allocator stack has no .py frame so
+    // un-attributed blocks still fan out rather than all turning gray.
+    const hueKey = a.top_frame_idx >= 0 ? a.top_frame_idx : 0x100000 + a.stack_idx;
+    const inst = instanceCount.get(hueKey) || 0;
+    instanceCount.set(hueKey, inst + 1);
+    const [r, g, bl] = blockColor(hueKey, inst);
     const sz = a.size;
     const startStripIdx = writeIdx;
     for (const s of stripsPerAlloc[i]) {
       const tStart = stripsFlat[s * 4 + 1];
       const tEnd = stripsFlat[s * 4 + 2];
-      const yOff = stripsFlat[s * 4 + 3] + baseline;
+      const yOff = stripsFlat[s * 4 + 3];
       const off = writeIdx * STRIP_FLOATS;
       stripBuffer[off] = tStart - timeMin;
       stripBuffer[off + 1] = tEnd - timeMin;

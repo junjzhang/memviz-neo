@@ -87,19 +87,44 @@ export default function PhaseTimeline({
   const glCanvasRef = useRef<HTMLCanvasElement>(null);  // WebGL strips
   const glRef = useRef<GLState | null>(null);
   const stripKeyRef = useRef("");
-  const [viewRange, setViewRange] = useState<[number, number]>([
-    data.time_min,
-    data.time_max,
-  ]);
+
+  // Imperative state: these change at 60+Hz (pan, drag, ruler move).
+  // Keeping them in refs means mousemove/keydown don't cause React to
+  // re-render PhaseTimeline. The single rAF loop at the bottom reads
+  // these refs each frame and repaints when dirtyRef is set.
+  const viewRangeRef = useRef<[number, number]>([data.time_min, data.time_max]);
+  const rulerRef = useRef<Ruler | null>(null);
+  const selRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const selStartRef = useRef<{ x: number; y: number } | null>(null);
+  // Single source of "please repaint". Set by every ref mutation above
+  // and by effect setups; the rAF loop clears it after each frame.
+  // Default true so first paint happens.
+  const dirtyRef = useRef(true);
+  const invalidate = () => { dirtyRef.current = true; };
+
+  // Scratch buffers for the per-frame "which blocks intersect viewRange"
+  // dedup. Allocating fresh each frame would hit GC hard.
+  const visitedBIsRef = useRef<Uint32Array | null>(null);
+  const visitGenRef = useRef<number>(0);
+
+  // React state: low-frequency only — detail panel from click, selection
+  // highlight. PhaseTimeline re-renders only when these change, never
+  // during pan/hover/drag.
   const [selectedBlock, setSelectedBlock] = useState<TimelineBlock | null>(null);
   const [detail, setDetail] = useState<AllocationDetail | null>(null);
-  const [hoverBlock, setHoverBlock] = useState<TimelineBlock | null>(null);
-  // Previously held the pixel pos of the cursor-following tooltip. The
-  // hover card is now pinned to the plot's top-right so pos isn't needed,
-  // but the setter is kept to preserve the existing mouse-move flow.
-  const [, setHoverPos] = useState<{ x: number; y: number } | null>(null);
-  const [selRect, setSelRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
-  const selStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Hover state is pure refs. A 1100-line component with dozens of hooks
+  // can't afford to re-render 60+ times/sec when the cursor crosses
+  // 20k+ densely-packed blocks — the old setHoverBlock + setHoverAnomaly
+  // approach was eating 300+ ms/s of main thread at scale. The hover
+  // card DOM is updated imperatively below.
+  const hoverBlockRef = useRef<TimelineBlock | null>(null);
+  const hoverAnomalyRef = useRef<{ anomaly: Anomaly; x: number; y: number } | null>(null);
+  const hoverCardRef = useRef<HTMLDivElement>(null);
+  const hcEyebrowRef = useRef<HTMLDivElement>(null);
+  const hcPrimaryRef = useRef<HTMLDivElement>(null);
+  const hcSecondaryRef = useRef<HTMLDivElement>(null);
+  const hcTertiaryRef = useRef<HTMLDivElement>(null);
 
   // Anomaly focus from store — smooth animated transition
   const focusedAddr = useDataStore((s) => s.focusedAddr);
@@ -109,14 +134,15 @@ export default function PhaseTimeline({
   useEffect(() => {
     if (!focusRange) return;
     cancelAnimationFrame(animRef.current);
-    const from: [number, number] = [...viewRange];
+    const from: [number, number] = [...viewRangeRef.current];
     const to = focusRange;
     const start = performance.now();
     const duration = 350;
     function tick(now: number) {
       const t = Math.min(1, (now - start) / duration);
       const ease = t * (2 - t); // ease-out quad
-      setViewRange([from[0] + (to[0] - from[0]) * ease, from[1] + (to[1] - from[1]) * ease]);
+      viewRangeRef.current = [from[0] + (to[0] - from[0]) * ease, from[1] + (to[1] - from[1]) * ease];
+      invalidate();
       if (t < 1) animRef.current = requestAnimationFrame(tick);
     }
     animRef.current = requestAnimationFrame(tick);
@@ -135,13 +161,8 @@ export default function PhaseTimeline({
     }
   }, [focusedAddr, blocks, currentRank]);
 
-  // Ruler state
-  const [ruler, setRuler] = useState<Ruler | null>(null);
   const rulerDragRef = useRef<{ type: RulerType; startPx: { x: number; y: number } } | null>(null);
   const keysDownRef = useRef<Set<string>>(new Set());
-
-  // Anomaly flag hover
-  const [hoverAnomaly, setHoverAnomaly] = useState<{ anomaly: Anomaly; x: number; y: number } | null>(null);
 
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
@@ -180,8 +201,14 @@ export default function PhaseTimeline({
     return { bMax, bw, B };
   }, [blocks, stripBuffer, data.time_min, data.time_max]);
 
-  const maxBytes = useMemo(() => {
-    const [tMin, tMax] = viewRange;
+  // maxBytes is computed inside the rAF loop from viewRangeRef — no
+  // useMemo because viewRangeRef isn't reactive. Keep a ref so hitTest
+  // and mouse handlers (which need yToBytes too) can read the last
+  // frame's value without recomputing.
+  const maxBytesRef = useRef<number>(maxBytesFull || data.peak_bytes * 1.1);
+
+  function computeMaxBytes(): number {
+    const [tMin, tMax] = viewRangeRef.current;
     if (tMin <= data.time_min && tMax >= data.time_max && maxBytesFull > 0) {
       return maxBytesFull;
     }
@@ -193,30 +220,40 @@ export default function PhaseTimeline({
     let maxB = 0;
     for (let b = bStart; b <= bEnd; b++) if (bMax[b] > maxB) maxB = bMax[b];
     return (maxB || data.peak_bytes) * 1.1;
-  }, [viewRange, timeBuckets, data.peak_bytes, data.time_min, data.time_max, maxBytesFull]);
+  }
 
   useEffect(() => {
-    setViewRange([data.time_min, data.time_max]);
+    viewRangeRef.current = [data.time_min, data.time_max];
     setSelectedBlock(null);
     setDetail(null);
-    setRuler(null);
+    rulerRef.current = null;
+    invalidate();
   }, [data.time_min, data.time_max]);
 
+  // Scale helpers: read the current ref each call, so mouse handlers
+  // and hitTest always see the latest pan/zoom without needing the
+  // component to re-render.
   const timeToX = useCallback(
-    (t: number) => MARGIN.left + ((t - viewRange[0]) / (viewRange[1] - viewRange[0])) * plotW,
-    [viewRange, plotW],
+    (t: number) => {
+      const [vMin, vMax] = viewRangeRef.current;
+      return MARGIN.left + ((t - vMin) / (vMax - vMin)) * plotW;
+    },
+    [plotW],
   );
   const xToTime = useCallback(
-    (x: number) => viewRange[0] + ((x - MARGIN.left) / plotW) * (viewRange[1] - viewRange[0]),
-    [viewRange, plotW],
+    (x: number) => {
+      const [vMin, vMax] = viewRangeRef.current;
+      return vMin + ((x - MARGIN.left) / plotW) * (vMax - vMin);
+    },
+    [plotW],
   );
   const bytesToY = useCallback(
-    (b: number) => MARGIN.top + plotH - (b / maxBytes) * plotH,
-    [maxBytes, plotH],
+    (b: number) => MARGIN.top + plotH - (b / maxBytesRef.current) * plotH,
+    [plotH],
   );
   const yToBytes = useCallback(
-    (y: number) => ((MARGIN.top + plotH - y) / plotH) * maxBytes,
-    [maxBytes, plotH],
+    (y: number) => ((MARGIN.top + plotH - y) / plotH) * maxBytesRef.current,
+    [plotH],
   );
 
   // --- WebGL strip upload (zero-copy from pre-packed buffer) ---
@@ -229,10 +266,16 @@ export default function PhaseTimeline({
     if (key !== stripKeyRef.current) {
       uploadStrips(glRef.current, stripBuffer, stripCount);
       stripKeyRef.current = key;
+      invalidate();
     }
   }, [stripBuffer, stripCount, currentRank]);
 
-  // --- Render: WebGL strips + 2D overlay ---
+  // --- Render: WebGL strips + 2D overlay, driven by a single rAF loop ---
+  //
+  // The loop owns pan/zoom/hover/ruler painting. Mousemove/keyboard
+  // updates only touch refs; we read them here each frame. React never
+  // re-renders PhaseTimeline during navigation, so hover and drag stay
+  // at a solid 60fps regardless of how busy the rest of the page is.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -246,7 +289,19 @@ export default function PhaseTimeline({
     canvas.style.height = `${height}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const [tMin, tMax] = viewRange;
+    dirtyRef.current = true;
+    let rafId = 0;
+    const draw = () => {
+      rafId = requestAnimationFrame(draw);
+      // Skip frame entirely when nothing changed — rAF stays armed so
+      // the next mutation gets picked up, but idle CPU drops to ~0.
+      if (!dirtyRef.current) return;
+      dirtyRef.current = false;
+      const maxBytes = computeMaxBytes();
+      maxBytesRef.current = maxBytes;
+      const [tMin, tMax] = viewRangeRef.current;
+      const ruler = rulerRef.current;
+      const selRect = selRectRef.current;
 
       // WebGL: draw strips (one draw call, GPU-accelerated)
       if (glRef.current) {
@@ -261,32 +316,19 @@ export default function PhaseTimeline({
       ctx.fillRect(0, MARGIN.top, MARGIN.left, plotH);
       ctx.fillRect(MARGIN.left + plotW, MARGIN.top, MARGIN.right, plotH);
 
-      // Pre-trace baseline band — bytes alive before the ring buffer's
-      // window that never freed in it. No per-alloc detail, so draw as
-      // an aggregate stripe from y=0 up to y=baseline.
+      // Pre-trace baseline — bytes alive before the ring buffer's window that
+      // never freed. Strips are already rebased to y=0 in parseRank, so we
+      // only surface the baseline as an axis-level label rather than a filled
+      // band that would eat vertical space.
       if (data.baseline > 0) {
-        const yBase = bytesToY(data.baseline);
-        const yBottom = MARGIN.top + plotH;
-        if (yBase < yBottom) {
-          ctx.fillStyle = "rgba(120,120,135,0.18)";
-          ctx.fillRect(MARGIN.left, yBase, plotW, yBottom - yBase);
-          ctx.strokeStyle = "rgba(160,160,175,0.35)";
-          ctx.lineWidth = 1;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(MARGIN.left, yBase);
-          ctx.lineTo(MARGIN.left + plotW, yBase);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.fillStyle = "rgba(200,200,210,0.65)";
-          ctx.font = FONT_MONO_SM;
-          ctx.textAlign = "left";
-          ctx.fillText(
-            `pre-trace baseline · ${formatBytes(data.baseline)}`,
-            MARGIN.left + 6,
-            yBase - 5,
-          );
-        }
+        ctx.fillStyle = "rgba(160,160,175,0.55)";
+        ctx.font = FONT_MONO_SM;
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `+ pre-trace baseline · ${formatBytes(data.baseline)}`,
+          MARGIN.left + 6,
+          MARGIN.top + plotH - 5,
+        );
       }
 
       const yScale = plotH / maxBytes;
@@ -298,23 +340,87 @@ export default function PhaseTimeline({
       const tMinN = tMin - t0;
       const tMaxN = tMax - t0;
 
-      // Selection highlight
+      // Selection highlight — a block can span many strips (each strip is a
+      // time slice where its y-offset is constant). We group temporally
+      // adjacent strips into runs and stroke one polygon per run, so the
+      // outline traces only the outer contour instead of drawing seams
+      // between internal segments.
       if (selectedBlock && buf) {
         ctx.strokeStyle = COLOR_ACCENT;
         ctx.lineWidth = 2;
         const off0 = selectedBlock.stripOffset;
         const count = selectedBlock.stripCount;
+        const sz = selectedBlock.size;
+        type Seg = { x1: number; x2: number; yTop: number; yBot: number };
+        const run: Seg[] = [];
+        const flush = () => {
+          if (run.length === 0) return;
+          ctx.beginPath();
+          const first = run[0];
+          ctx.moveTo(first.x1, first.yTop);
+          for (let j = 0; j < run.length; j++) {
+            ctx.lineTo(run[j].x2, run[j].yTop);
+            if (j < run.length - 1) ctx.lineTo(run[j + 1].x1, run[j + 1].yTop);
+          }
+          const last = run[run.length - 1];
+          ctx.lineTo(last.x2, last.yBot);
+          for (let j = run.length - 1; j >= 0; j--) {
+            ctx.lineTo(run[j].x1, run[j].yBot);
+            if (j > 0) ctx.lineTo(run[j - 1].x2, run[j - 1].yBot);
+          }
+          ctx.closePath();
+          ctx.stroke();
+          run.length = 0;
+        };
+        let lastTe = -Infinity;
         for (let si = 0; si < count; si++) {
           const off = (off0 + si) * STRIP_FLOATS;
           const ts = buf[off], te = buf[off + 1];
-          if (te <= tMinN || ts >= tMaxN) continue;
-          const yo = buf[off + 2];
-          const x1 = Math.max(timeToX(ts + t0), MARGIN.left);
-          const x2 = Math.min(timeToX(te + t0), MARGIN.left + plotW);
-          if (x2 - x1 < 0.3) continue;
-          const y1 = bytesToY(yo + selectedBlock.size);
-          const y2 = bytesToY(yo);
-          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          if (te > tMinN && ts < tMaxN) {
+            const yo = buf[off + 2];
+            const x1 = Math.max(timeToX(ts + t0), MARGIN.left);
+            const x2 = Math.min(timeToX(te + t0), MARGIN.left + plotW);
+            if (x2 - x1 >= 0.3) {
+              const yTop = bytesToY(yo + sz);
+              const yBot = bytesToY(yo);
+              if (run.length > 0 && Math.abs(ts - lastTe) > 1e-6) flush();
+              run.push({ x1, x2, yTop, yBot });
+            }
+          }
+          lastTe = te;
+        }
+        flush();
+      }
+
+      // Compute visible block indices via the time-bucket index.
+      // Without this we'd scan all N blocks twice per frame (labels +
+      // pending-free overlay), which at 50k blocks = ~100k-plus ops per
+      // frame of pure overhead even for blocks entirely off-screen.
+      let visibleBIs: Int32Array | null = null;
+      let visibleCount = 0;
+      if (buf && hitIndex) {
+        const { packed, bw, B } = hitIndex;
+        const bStart = Math.max(0, Math.floor((tMin - data.time_min) / bw));
+        const bEnd = Math.min(B - 1, Math.floor((tMax - data.time_min) / bw));
+        let total = 0;
+        for (let b = bStart; b <= bEnd; b++) total += packed[b].length;
+        visibleBIs = new Int32Array(total);
+        // Dedup via a visited Uint8Array — a fresh one per frame is
+        // cheaper than allocating a Set. Size is stable once blocks
+        // lands; we keep a persistent buffer on visitedBIsRef.
+        const vis = (visitedBIsRef.current && visitedBIsRef.current.length >= blocks.length)
+          ? visitedBIsRef.current
+          : (visitedBIsRef.current = new Uint32Array(blocks.length));
+        visitGenRef.current++;
+        const gen = visitGenRef.current;
+        for (let b = bStart; b <= bEnd; b++) {
+          const list = packed[b];
+          for (let k = 0; k < list.length; k++) {
+            const bi = list[k];
+            if (vis[bi] === gen) continue;
+            vis[bi] = gen;
+            visibleBIs[visibleCount++] = bi;
+          }
         }
       }
 
@@ -322,7 +428,9 @@ export default function PhaseTimeline({
       if (buf) {
         ctx.globalAlpha = 0.92;
         ctx.font = FONT_MONO_SM;
-        for (const block of blocks) {
+        const n = visibleBIs ? visibleCount : blocks.length;
+        for (let idx = 0; idx < n; idx++) {
+          const block = blocks[visibleBIs ? visibleBIs[idx] : idx];
           let bestX1 = 0, bestY1 = 0, bestW = 0, bestH = 0;
           const off0 = block.stripOffset;
           const count = block.stripCount;
@@ -353,7 +461,9 @@ export default function PhaseTimeline({
         ctx.globalAlpha = 1;
 
         // Pending-free red overlay
-        for (const block of blocks) {
+        const nPending = visibleBIs ? visibleCount : blocks.length;
+        for (let idx = 0; idx < nPending; idx++) {
+          const block = blocks[visibleBIs ? visibleBIs[idx] : idx];
           if (block.free_requested_us <= 0) continue;
           if (block.size * yScale < 0.5) continue;
           const frqN = block.free_requested_us - t0;
@@ -449,6 +559,8 @@ export default function PhaseTimeline({
     // --- Overlay effects (hover, rulers, selection) ---
 
     // Hover range
+    const hoverBlock = hoverBlockRef.current;
+    const hoverAnomaly = hoverAnomalyRef.current;
     if ((hoverBlock || hoverAnomaly) && !selRect) {
       const hb = hoverBlock || blocks.find((b) => b.addr === hoverAnomaly?.anomaly.addr);
       if (hb) {
@@ -516,7 +628,16 @@ export default function PhaseTimeline({
       ctx.strokeStyle = COLOR_ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
       ctx.strokeRect(sx1, sy1, sw, sh); ctx.setLineDash([]);
     }
-  }, [data, blocks, stripBuffer, anomalies, viewRange, width, height, timeToX, xToTime, bytesToY, yToBytes, maxBytes, plotW, plotH, selectedBlock, hoverBlock, hoverAnomaly, ruler, selRect]);
+    }; // end of draw fn
+    rafId = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafId);
+  // Deps intentionally minimal — the rAF loop re-reads refs every
+  // frame, so we only restart the loop when inputs that feed draw()
+  // but live in React land actually change.
+  // hoverBlock / hoverAnomaly are NOT in deps: they live in refs and
+  // the rAF loop picks up changes via invalidate(). Adding them would
+  // undo the whole point of the refactor.
+  }, [data, blocks, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedBlock, timeBuckets, framePool, maxBytesFull]);
 
   // Bucketed hit index: each time bucket lists the block indices whose
   // strips intersect that bucket. hitTest only scans candidates for the
@@ -612,31 +733,78 @@ export default function PhaseTimeline({
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ mx: number; my: number } | null>(null);
 
+  // Imperative DOM update for the hover card. Bypasses React entirely
+  // so 60Hz hover motion doesn't re-render this 1000-line component.
+  const updateHoverCard = useCallback(() => {
+    const card = hoverCardRef.current;
+    if (!card) return;
+    const hb = hoverBlockRef.current;
+    const ha = hoverAnomalyRef.current;
+    if (!hb && !ha) {
+      if (card.style.display !== "none") card.style.display = "none";
+      return;
+    }
+    const eb = hcEyebrowRef.current!;
+    const pr = hcPrimaryRef.current!;
+    const se = hcSecondaryRef.current!;
+    const te = hcTertiaryRef.current!;
+    if (ha) {
+      const color = ANOMALY_COLORS[ha.anomaly.type];
+      card.style.borderLeft = `2px solid ${color}`;
+      eb.style.color = color;
+      eb.textContent = ha.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect";
+      pr.textContent = formatBytes(ha.anomaly.size);
+      se.textContent = ha.anomaly.label;
+      te.textContent = formatTopFrame(ha.anomaly.top_frame_idx, framePool);
+    } else if (hb) {
+      card.style.borderLeft = "2px solid var(--accent)";
+      eb.style.color = "var(--fg-faint)";
+      eb.textContent = "Block";
+      pr.textContent = formatBytes(hb.size);
+      se.textContent = formatTopFrame(hb.top_frame_idx, framePool) || `0x${hb.addr.toString(16)}`;
+      const dur = ((hb.free_us - hb.alloc_us) / 1e6).toFixed(4);
+      te.textContent = hb.alive ? `${dur}s · alive` : `${dur}s`;
+    }
+    card.style.display = "block";
+  }, [framePool]);
+
   const runHoverDetection = useCallback(() => {
     hoverRafRef.current = null;
     const pos = hoverPendingRef.current;
     hoverPendingRef.current = null;
     if (!pos) return;
     const { mx, my } = pos;
-    // Flag hit (top margin area) takes precedence over block hover.
+
+    // Compute new hover targets first; only commit + redraw if anything
+    // actually changed. (Equivalent to React's automatic bail-out when
+    // setState is called with the same identity — which we lost going
+    // imperative. Without this, mouse-moves inside a single block
+    // trigger a redraw every frame.)
+    let nextAnomaly: { anomaly: Anomaly; x: number; y: number } | null = null;
+    let nextBlock: TimelineBlock | null = null;
     if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
       const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
       for (let ai = 0; ai < flagLimit; ai++) {
         const anomaly = anomalies[ai];
         const fx = timeToX(anomaly.alloc_us);
         if (Math.abs(mx - fx) < FLAG_SIZE) {
-          setHoverAnomaly({ anomaly, x: mx, y: my });
-          setHoverBlock(null);
-          setHoverPos(null);
-          return;
+          nextAnomaly = { anomaly, x: mx, y: my };
+          break;
         }
       }
     }
-    setHoverAnomaly(null);
-    const hit = hitTest(mx, my);
-    setHoverBlock(hit);
-    setHoverPos(hit ? { x: mx, y: my } : null);
-  }, [anomalies, timeToX, hitTest]);
+    if (!nextAnomaly) nextBlock = hitTest(mx, my);
+
+    const prevAnomaly = hoverAnomalyRef.current;
+    const prevBlock = hoverBlockRef.current;
+    const anomalySame = prevAnomaly?.anomaly === nextAnomaly?.anomaly;
+    if (anomalySame && prevBlock === nextBlock) return;
+
+    hoverAnomalyRef.current = nextAnomaly;
+    hoverBlockRef.current = nextBlock;
+    updateHoverCard();
+    invalidate();
+  }, [anomalies, timeToX, hitTest, updateHoverCard]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
@@ -650,7 +818,8 @@ export default function PhaseTimeline({
         const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
         const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
         const endPx = type === "vertical" ? { x: startPx.x, y: cy } : { x: cx, y: startPx.y };
-        setRuler({ type, startPx, endPx });
+        rulerRef.current = { type, startPx, endPx };
+        invalidate();
         return;
       }
 
@@ -658,7 +827,8 @@ export default function PhaseTimeline({
       if (selStartRef.current) {
         const cx = Math.max(MARGIN.left, Math.min(MARGIN.left + plotW, mx));
         const cy = Math.max(MARGIN.top, Math.min(MARGIN.top + plotH, my));
-        setSelRect({ x1: selStartRef.current.x, y1: selStartRef.current.y, x2: cx, y2: cy });
+        selRectRef.current = { x1: selStartRef.current.x, y1: selStartRef.current.y, x2: cx, y2: cy };
+        invalidate();
         return;
       }
 
@@ -680,8 +850,9 @@ export default function PhaseTimeline({
 
       // Escape dismisses ruler
       if (key === "escape") {
-        setRuler(null);
+        rulerRef.current = null;
         rulerDragRef.current = null;
+        invalidate();
         e.preventDefault();
         return;
       }
@@ -709,10 +880,9 @@ export default function PhaseTimeline({
     keysDownRef.current.delete(e.key.toLowerCase());
   }, []);
 
-  // Continuous smooth navigation via rAF while WASD/arrows are held
+  // Continuous smooth navigation via rAF while WASD/arrows are held.
+  // Writes viewRangeRef directly; the render loop above picks it up.
   const navRafRef = useRef<number>(0);
-  const viewRangeRef = useRef(viewRange);
-  viewRangeRef.current = viewRange;
 
   useEffect(() => {
     let running = true;
@@ -753,7 +923,8 @@ export default function PhaseTimeline({
         }
 
         if (newMin !== tMin || newMax !== tMax) {
-          setViewRange([newMin, newMax]);
+          viewRangeRef.current = [newMin, newMax];
+          invalidate();
         }
       }
       navRafRef.current = requestAnimationFrame(tick);
@@ -812,7 +983,8 @@ export default function PhaseTimeline({
           const newTMin = xToTime(cx1);
           const newTMax = xToTime(cx2);
           if (newTMax - newTMin > 100) {
-            setViewRange([newTMin, newTMax]);
+            viewRangeRef.current = [newTMin, newTMax];
+            invalidate();
           }
         } else {
           // Click — flag or block selection
@@ -827,7 +999,8 @@ export default function PhaseTimeline({
                 const d = useDataStore.getState().getDetail(currentRank, anomaly.addr);
                 setDetail(d);
                 selStartRef.current = null;
-                setSelRect(null);
+                selRectRef.current = null;
+                invalidate();
                 return;
               }
             }
@@ -839,7 +1012,8 @@ export default function PhaseTimeline({
         }
       }
       selStartRef.current = null;
-      setSelRect(null);
+      selRectRef.current = null;
+      invalidate();
     },
     [hitTest, currentRank, anomalies, blocks, timeToX],
   );
@@ -871,81 +1045,56 @@ export default function PhaseTimeline({
               hoverRafRef.current = null;
             }
             hoverPendingRef.current = null;
-            setHoverBlock(null);
-            setHoverPos(null);
-            setHoverAnomaly(null);
+            hoverBlockRef.current = null;
+            hoverAnomalyRef.current = null;
+            updateHoverCard();
             selStartRef.current = null;
-            setSelRect(null);
+            selRectRef.current = null;
             if (rulerDragRef.current) rulerDragRef.current = null;
+            invalidate();
           }}
-          onDoubleClick={() => setViewRange([data.time_min, data.time_max])}
+          onDoubleClick={() => { viewRangeRef.current = [data.time_min, data.time_max]; invalidate(); }}
         />
-        {/* Pinned hover info — anchored top-right of the plot area so
-            it never sits under the cursor or hides strips. Stays empty
-            when nothing is hovered. */}
-        {(hoverBlock || hoverAnomaly) && (
+        {/* Hover card skeleton — content is written imperatively by
+            updateHoverCard() to avoid re-rendering PhaseTimeline on
+            every mousemove. display:none when not hovered. */}
+        <div
+          ref={hoverCardRef}
+          className="tl-hover-card"
+          style={{
+            right: MARGIN.right + 8,
+            top: MARGIN.top + 8,
+            display: "none",
+            borderLeft: "2px solid var(--accent)",
+          }}
+        >
           <div
-            className="tl-hover-card"
+            ref={hcEyebrowRef}
+            className="display"
             style={{
-              right: MARGIN.right + 8,
-              top: MARGIN.top + 8,
-              borderLeft: hoverAnomaly
-                ? `2px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`
-                : "2px solid var(--accent)",
+              fontSize: 10,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              marginBottom: 4,
+              color: "var(--fg-faint)",
             }}
-          >
-            {hoverAnomaly ? (
-              <>
-                <div
-                  className="display"
-                  style={{
-                    color: ANOMALY_COLORS[hoverAnomaly.anomaly.type],
-                    fontSize: 10,
-                    letterSpacing: "0.14em",
-                    textTransform: "uppercase",
-                    marginBottom: 4,
-                  }}
-                >
-                  {hoverAnomaly.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect"}
-                </div>
-                <div className="mono" style={{ color: "var(--fg)", fontSize: 13, marginBottom: 2 }}>
-                  {formatBytes(hoverAnomaly.anomaly.size)}
-                </div>
-                <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
-                  {hoverAnomaly.anomaly.label}
-                </div>
-                <div className="mono faint" style={{ fontSize: 10 }}>
-                  {formatTopFrame(hoverAnomaly.anomaly.top_frame_idx, framePool)}
-                </div>
-              </>
-            ) : hoverBlock ? (
-              <>
-                <div
-                  className="display"
-                  style={{
-                    color: "var(--fg-faint)",
-                    fontSize: 10,
-                    letterSpacing: "0.14em",
-                    textTransform: "uppercase",
-                    marginBottom: 4,
-                  }}
-                >
-                  Block
-                </div>
-                <div className="mono" style={{ color: "var(--fg)", fontSize: 14, marginBottom: 2 }}>
-                  {formatBytes(hoverBlock.size)}
-                </div>
-                <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
-                  {formatTopFrame(hoverBlock.top_frame_idx, framePool) || `0x${hoverBlock.addr.toString(16)}`}
-                </div>
-                <div className="mono faint" style={{ fontSize: 10 }}>
-                  {((hoverBlock.free_us - hoverBlock.alloc_us) / 1e6).toFixed(4)}s
-                  {hoverBlock.alive && " · alive"}
-                </div>
-              </>
-            ) : null}
-          </div>
-        )}
+          />
+          <div
+            ref={hcPrimaryRef}
+            className="mono"
+            style={{ color: "var(--fg)", fontSize: 14, marginBottom: 2 }}
+          />
+          <div
+            ref={hcSecondaryRef}
+            className="mono"
+            style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}
+          />
+          <div
+            ref={hcTertiaryRef}
+            className="mono faint"
+            style={{ fontSize: 10 }}
+          />
+        </div>
       </div>
 
       {/* Always-visible keyboard shortcut bar, outside the canvas so it

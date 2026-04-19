@@ -1,17 +1,45 @@
-// Muted palette — 12 evenly-spaced hues at low saturation (~35%).
-// Balanced cool/warm, avoids yellow-brown dominance. Kept in a WebGL-free
-// module so workers can import it without pulling in DOM/GL code.
-export const STRIP_PALETTE_RGB: readonly (readonly [number, number, number])[] = [
-  [0.42, 0.56, 0.73],  // steel blue    #6b8fba
-  [0.49, 0.49, 0.73],  // indigo        #7d7cba
-  [0.58, 0.49, 0.73],  // violet        #947cba
-  [0.69, 0.49, 0.71],  // orchid        #b07cb5
-  [0.69, 0.49, 0.58],  // mauve rose    #b07c93
-  [0.69, 0.54, 0.49],  // terracotta    #b08a7c
-  [0.69, 0.62, 0.49],  // sand          #b09f7c
-  [0.54, 0.69, 0.49],  // sage          #8ab07c
-  [0.49, 0.69, 0.54],  // mint          #7cb08a
-  [0.49, 0.69, 0.64],  // seafoam       #7cb0a3
-  [0.49, 0.62, 0.69],  // sky           #7c9eb0
-  [0.49, 0.53, 0.69],  // periwinkle    #7c87b0
-];
+// Semantic coloring for timeline blocks.
+//
+// Hue is derived from the block's "top frame" (first Python frame in the
+// call stack). Every alloc site on the same user-code line gets the
+// same hue, so memory from one layer/op forms a visible color band.
+//
+// Lightness + saturation shift per-instance inside the same top-frame
+// group — PyTorch re-executes a single call site hundreds of times
+// during training, and without the shift those N allocations would all
+// paint identically. Golden-ratio harmonics distribute the shifts so
+// adjacent instances never coincide.
+//
+// Worker-friendly: no DOM / GL imports.
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else { r = c; b = x; }
+  return [r + m, g + m, b + m];
+}
+
+const PHI  = 0.61803398875;
+const PHI2 = 0.41421356237;
+
+/**
+ * Stable color for one timeline block.
+ *   hueKey     — groups blocks that share meaning (usually top_frame_idx;
+ *                callers fall back to stack_idx / addr when no frame).
+ *   instanceIdx — 0-based counter among blocks sharing the same hueKey.
+ *                 Drives lightness so repeated allocs from the same line
+ *                 fan out as shades in the same family.
+ */
+export function blockColor(hueKey: number, instanceIdx: number): [number, number, number] {
+  const hue = ((hueKey * PHI) % 1) * 360;
+  const lig = 0.50 + ((instanceIdx * PHI) % 1) * 0.24;        // 0.50 – 0.74
+  const sat = 0.45 + ((instanceIdx * PHI2) % 1) * 0.18;       // 0.45 – 0.63
+  return hslToRgb(hue, sat, lig);
+}
