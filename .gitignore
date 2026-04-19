@@ -6,3 +6,4 @@ __pycache__/
 *.pickle
 /web/dist/
 /.superset/
+/.claude/
