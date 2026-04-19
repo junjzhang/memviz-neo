@@ -1,19 +1,17 @@
-import { useTransition, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
 import { formatBytes } from "../utils";
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { ranks, currentRank, summary, loading, setCurrentRank } = useDataStore();
+  const { currentRank, summary, loading } = useDataStore();
+  const hasData = useDataStore((s) => s.ranks.length > 0);
   const resetFiles = useFileStore((s) => s.reset);
   const resetData = useDataStore((s) => s.resetData);
-  const [isPending, startTransition] = useTransition();
   const handleReset = () => {
     resetFiles();
     resetData();
   };
-  const handleRankChange = (r: number) =>
-    startTransition(() => setCurrentRank(r));
 
   const utilPct = summary && summary.total_reserved > 0
     ? ((summary.total_allocated / summary.total_reserved) * 100).toFixed(1)
@@ -44,18 +42,9 @@ export default function Layout({ children }: { children: ReactNode }) {
           <div className="app-brand display">
             memviz<span style={{ color: "var(--accent)" }}>/neo</span>
           </div>
-          {ranks.length > 0 && (
-            <div className="seg" style={{ marginLeft: 8, opacity: isPending ? 0.6 : 1 }}>
-              <select
-                value={currentRank}
-                onChange={(e) => handleRankChange(Number(e.target.value))}
-              >
-                {ranks.map((r) => (
-                  <option key={r} value={r}>
-                    rank {String(r).padStart(2, "0")}
-                  </option>
-                ))}
-              </select>
+          {hasData && (
+            <div className="rank-badge mono" title="Use Multi-Rank Overview below to switch">
+              R{String(currentRank).padStart(2, "0")}
             </div>
           )}
         </div>
@@ -125,6 +114,17 @@ export default function Layout({ children }: { children: ReactNode }) {
           font-weight: 600;
           letter-spacing: -0.02em;
           color: var(--fg);
+        }
+        .rank-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 4px 10px;
+          font-size: 11px;
+          font-weight: 500;
+          letter-spacing: 0.1em;
+          color: var(--accent);
+          border: 1px solid var(--border-strong);
+          background: var(--accent-bg);
         }
         .app-header-stats {
           display: flex;
