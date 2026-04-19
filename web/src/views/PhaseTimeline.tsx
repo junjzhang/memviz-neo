@@ -348,13 +348,15 @@ export default function PhaseTimeline({
       if (!dirtyRef.current) return;
       dirtyRef.current = false;
       lastPaintedViewRef.current = [vr[0], vr[1]];
-      // Y range: manual override (from selection drag / Shift+W/S) wins;
-      // otherwise auto-fit to the visible X window.
+      // Y range: manual override (selection drag / Shift+W/S) wins; else
+      // anchor yMin at the pre-window baseline so the plot shows only
+      // the in-window delta on top. Baseline bytes still exist — they
+      // just live off-axis and the bottom tick carries the label.
       let yMin: number, yMax: number;
       if (manualYRangeRef.current) {
         [yMin, yMax] = manualYRangeRef.current;
       } else {
-        yMin = 0;
+        yMin = data.baseline;
         yMax = computeMaxBytes();
       }
       yRangeRef.current = [yMin, yMax];
@@ -376,46 +378,10 @@ export default function PhaseTimeline({
       ctx.fillRect(0, MARGIN.top, MARGIN.left, plotH);
       ctx.fillRect(MARGIN.left + plotW, MARGIN.top, MARGIN.right, plotH);
 
-      // Pre-window baseline — bytes alive before the ring buffer's
-      // window began. parseRank already shifts in-window strips up by
-      // this amount so the Y axis shows absolute bytes; here we paint
-      // the grey floor to make "these allocations exist but we can't
-      // attribute them" obvious at a glance.
-      if (data.baseline > 0 && maxBytes > 0) {
-        const yTop = bytesToY(data.baseline);
-        const yBot = MARGIN.top + plotH;
-        const h = yBot - yTop;
-        if (h > 0.5) {
-          // Clip everything to the plot rect so the hatch lines can't
-          // bleed into the axis margins.
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(MARGIN.left, yTop, plotW, h);
-          ctx.clip();
-          ctx.fillStyle = "rgba(63,63,70,0.55)";
-          ctx.fillRect(MARGIN.left, yTop, plotW, h);
-          ctx.strokeStyle = "rgba(113,113,122,0.35)";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          const step = 8;
-          for (let x = MARGIN.left - plotH; x < MARGIN.left + plotW; x += step) {
-            ctx.moveTo(x, yBot);
-            ctx.lineTo(x + plotH, yTop);
-          }
-          ctx.stroke();
-          ctx.restore();
-          if (h > 14) {
-            ctx.fillStyle = "rgba(228,228,231,0.8)";
-            ctx.font = FONT_MONO_SM;
-            ctx.textAlign = "left";
-            ctx.fillText(
-              `pre-window baseline · ${formatBytes(data.baseline)}`,
-              MARGIN.left + 6,
-              yTop + Math.min(h - 4, 14),
-            );
-          }
-        }
-      }
+      // The pre-window baseline no longer paints a hatched band — the
+      // Y axis starts at data.baseline when auto-fitting, and the
+      // bottom tick label carries that number. If the user manually
+      // Y-pans below baseline (Shift+A), empty space below is fine.
 
       const yScale = plotH / maxBytes;
 
