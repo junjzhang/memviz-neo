@@ -5,27 +5,43 @@
 import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../types/snapshot";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
-import type { Allocation, RankData } from "./index";
+import type { Allocation, RankData, AllocationLite } from "./index";
 import { STRIP_PALETTE_RGB } from "./palette";
 
 export interface ParseResult {
   data: RankData;
   /**
-   * Frames table kept worker-local. Not sent to the main thread to avoid
-   * the dominant structured-clone cost (each rank can have 20k+ allocations
-   * each carrying ~25 frame dicts). Main thread fetches on demand via
-   * the worker's detail channel.
+   * Full allocation records (addr/size/time/top_frame/frames) kept
+   * worker-local. Never crosses the message boundary at load time —
+   * every structured-clone byte of this would be main-thread jank.
+   * Fetched lazily via pool.getDetail(rank, addr).
    */
-  framesByAddr: Map<number, { name: string; filename: string; line: number }[]>;
+  detailsByAddr: Map<number, {
+    addr: number;
+    size: number;
+    alloc_us: number;
+    free_us: number;
+    top_frame: string;
+    frames: { name: string; filename: string; line: number }[];
+  }>;
 }
 
 export function parseRank(json: string, _rank: number): ParseResult {
   const raw = JSON.parse(json);
   const summary: RankSummary = raw.summary;
 
-  const framesByAddr = new Map<number, { name: string; filename: string; line: number }[]>();
+  const detailsByAddr = new Map<number, any>();
+  // Full allocations go to detectAnomalies only; nothing survives the
+  // function except small derived structures.
   const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => {
-    if (a.frames && a.frames.length) framesByAddr.set(a.addr, a.frames);
+    detailsByAddr.set(a.addr, {
+      addr: a.addr,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_us: a.free_us,
+      top_frame: a.top_frame,
+      frames: a.frames || [],
+    });
     return {
       addr: a.addr,
       size: a.size,
@@ -33,9 +49,7 @@ export function parseRank(json: string, _rank: number): ParseResult {
       free_requested_us: a.free_requested_us,
       free_us: a.free_us,
       top_frame: a.top_frame,
-      // frames dropped here; kept in framesByAddr (worker-local).
-      frames: [],
-    };
+    } satisfies AllocationLite as any;
   });
   // detectAnomalies uses addr/size/time/top_frame; it doesn't need frames.
   const anomalies: Anomaly[] = detectAnomalies(allocations, raw.timeline.time_max);
@@ -138,6 +152,10 @@ export function parseRank(json: string, _rank: number): ParseResult {
     }
   }
 
+  // Discard the big `allocations` array before returning — detectAnomalies
+  // consumed it and we don't want to clone it across the worker boundary.
+  void allocations;
+
   const data: RankData = {
     summary,
     treemap,
@@ -152,11 +170,10 @@ export function parseRank(json: string, _rank: number): ParseResult {
       allocation_count: raw.timeline.allocation_count,
     },
     timelineBlocks: raw.blocks,
-    allocations,
     anomalies,
     stripBuffer,
     stripCount,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
   };
-  return { data, framesByAddr };
+  return { data, detailsByAddr };
 }

@@ -10,7 +10,7 @@ import type {
   TimelineBlock,
   AllocationDetail,
 } from "../types/timeline";
-import type { RankData, Anomaly, Allocation } from "../compute";
+import type { RankData, Anomaly } from "../compute";
 import { getActivePool } from "./fileStore";
 
 interface DataState {
@@ -34,7 +34,6 @@ interface DataState {
   focusRange: [number, number] | null;
 
   _rankCache: Map<number, RankData>;
-  _allocCache: Map<number, Allocation[]>;
 
   setCurrentRank: (rank: number) => void;
   loadFromFiles: (rankData: Map<number, RankData>) => void;
@@ -82,24 +81,17 @@ export const useDataStore = create<DataState>((set, get) => ({
   focusedAddr: null,
   focusRange: null,
   _rankCache: new Map(),
-  _allocCache: new Map(),
 
   setCurrentRank: (rank: number) => {
     const data = get()._rankCache.get(rank);
     if (!data) return;
-    const ac = new Map(get()._allocCache);
-    ac.set(rank, data.allocations);
-    set({ ...applyRankData(data, rank), _allocCache: ac });
+    set(applyRankData(data, rank));
   },
 
   loadFromFiles: (rankData: Map<number, RankData>) => {
     const state = get();
     const parsedRanks = [...rankData.keys()].sort((a, b) => a - b);
 
-    // New dataset if:
-    //  - nothing loaded yet, OR
-    //  - _rankCache reference changed (reset + new load), OR
-    //  - currentRank no longer exists in new data
     const isNewDataset =
       !state.summary ||
       state._rankCache !== rankData && !state._rankCache.has(parsedRanks[0]) ||
@@ -108,18 +100,14 @@ export const useDataStore = create<DataState>((set, get) => ({
     if (isNewDataset) {
       const first = parsedRanks[0];
       const data = rankData.get(first)!;
-      const ac = new Map<number, Allocation[]>();
-      ac.set(first, data.allocations);
       set({
         ranks: parsedRanks,
         multiRankOverview: parsedRanks.map((r) => rankData.get(r)!.summary),
         _rankCache: rankData,
-        _allocCache: ac,
         error: null,
         ...applyRankData(data, first),
       });
     } else {
-      // Progressive update in same dataset: only refresh rank list and overview
       const needsOverview = parsedRanks.length !== state.ranks.length;
       set({
         ranks: parsedRanks,
@@ -130,22 +118,11 @@ export const useDataStore = create<DataState>((set, get) => ({
   },
 
   getDetail: async (rank: number, addr: number): Promise<AllocationDetail | null> => {
-    const allocs = get()._allocCache.get(rank);
-    const a = allocs?.find((x) => x.addr === addr);
-    if (!a) return null;
-    // Frames live in the worker — fetch them asynchronously, off the
-    // main-thread critical path. Returns quickly with frames=[] if the
-    // worker pool has already been torn down.
+    // All allocation detail (size/time/top_frame + frames) is kept worker-
+    // local. Fetch the complete record in a single round-trip.
     const pool = getActivePool();
-    const frames = pool ? await pool.getDetail(rank, addr) : [];
-    return {
-      addr: a.addr,
-      size: a.size,
-      alloc_us: a.alloc_us,
-      free_us: a.free_us,
-      top_frame: a.top_frame,
-      frames,
-    };
+    if (!pool) return null;
+    return pool.getDetail(rank, addr);
   },
 
   focusAnomaly: (anomaly: Anomaly) => {
@@ -174,6 +151,5 @@ export const useDataStore = create<DataState>((set, get) => ({
     focusedAddr: null,
     focusRange: null,
     _rankCache: new Map(),
-    _allocCache: new Map(),
   }),
 }));

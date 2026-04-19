@@ -10,8 +10,7 @@
 // @ts-ignore — Vite handles this URL pattern for WASM
 import wasmUrl from "../../../wasm/pkg/memviz_wasm_bg.wasm?url";
 import type { RankData } from "./index";
-
-type Frame = { name: string; filename: string; line: number };
+import type { AllocationDetail } from "../types/timeline";
 
 export interface WorkerTask {
   rank: number;
@@ -31,7 +30,7 @@ export type LoadPhase =
 
 export interface WorkerPool {
   processAll: (tasks: WorkerTask[]) => Promise<void>;
-  getDetail: (rank: number, addr: number) => Promise<Frame[]>;
+  getDetail: (rank: number, addr: number) => Promise<AllocationDetail | null>;
   terminate: () => void;
 }
 
@@ -54,7 +53,7 @@ export function createWorkerPool(
 
   // Outstanding detail requests, keyed by reqId.
   let nextReqId = 0;
-  const detailWaiters = new Map<number, (frames: Frame[]) => void>();
+  const detailWaiters = new Map<number, (d: AllocationDetail | null) => void>();
 
   function installDetailHandler() {
     for (const w of workers) {
@@ -64,7 +63,7 @@ export function createWorkerPool(
           const resolver = detailWaiters.get(e.data.reqId);
           if (resolver) {
             detailWaiters.delete(e.data.reqId);
-            resolver(e.data.frames);
+            resolver(e.data.detail);
           }
           return;
         }
@@ -142,11 +141,11 @@ export function createWorkerPool(
     installDetailHandler();
   }
 
-  async function getDetail(rank: number, addr: number): Promise<Frame[]> {
+  async function getDetail(rank: number, addr: number): Promise<AllocationDetail | null> {
     const wIdx = rankWorker.get(rank);
-    if (wIdx === undefined) return [];
+    if (wIdx === undefined) return null;
     const reqId = ++nextReqId;
-    return new Promise<Frame[]>((resolve) => {
+    return new Promise<AllocationDetail | null>((resolve) => {
       detailWaiters.set(reqId, resolve);
       workers[wIdx].postMessage({ type: "detail", reqId, rank, addr });
     });
