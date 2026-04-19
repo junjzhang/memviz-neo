@@ -55,6 +55,10 @@ function formatTime(us: number): string {
   return `${(us / 1e6).toFixed(4)}s`;
 }
 
+function Kbd({ children }: { children: React.ReactNode }) {
+  return <kbd className="tl-kbd">{children}</kbd>;
+}
+
 function drawPill(ctx: CanvasRenderingContext2D, text: string, cx: number, cy: number) {
   ctx.font = FONT_MONO;
   const tw = ctx.measureText(text).width;
@@ -751,9 +755,34 @@ export default function PhaseTimeline({
             </div>
           </div>
         )}
-        <div className="tl-hint mono">
-          <span>WASD</span> navigate · <span>W/S</span> zoom · <span>R+drag</span> mem ruler · <span>T+drag</span> time ruler · <span>Esc</span> clear · <span>⌘C</span> copy
-        </div>
+      </div>
+
+      {/* Always-visible keyboard shortcut bar, outside the canvas so it
+          never gets hidden by tooltips or dark plot backgrounds. */}
+      <div className="tl-hint mono">
+        <Kbd>WASD</Kbd>
+        <span>navigate</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>W</Kbd><span className="tl-hint-slash">/</span><Kbd>S</Kbd>
+        <span>zoom</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>R</Kbd><span>+drag</span>
+        <span>mem ruler</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>T</Kbd><span>+drag</span>
+        <span>time ruler</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>drag</Kbd>
+        <span>zoom to region</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>dblclick</Kbd>
+        <span>reset</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>Esc</Kbd>
+        <span>clear</span>
+        <span className="tl-hint-sep">·</span>
+        <Kbd>⌘C</Kbd>
+        <span>copy trace</span>
       </div>
 
       {/* detail panel */}
@@ -833,16 +862,39 @@ export default function PhaseTimeline({
           box-shadow: 0 8px 24px rgba(0,0,0,0.5);
         }
         .tl-hint {
-          position: absolute;
-          bottom: 52px;
-          right: 28px;
-          font-size: 10px;
-          color: var(--fg-dim);
-          letter-spacing: 0.04em;
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 6px;
+          margin-top: 8px;
+          padding: 8px 12px;
+          border-top: 1px solid var(--divider);
+          font-size: 11px;
+          color: var(--fg-muted);
+          letter-spacing: 0.02em;
         }
-        .tl-hint span {
-          color: var(--fg-faint);
+        .tl-hint-sep {
+          color: var(--fg-dim);
+          margin: 0 4px;
+        }
+        .tl-hint-slash {
+          color: var(--fg-dim);
+          margin: 0 2px;
+        }
+        .tl-kbd {
+          display: inline-flex;
+          align-items: center;
+          padding: 1px 6px;
+          min-width: 20px;
+          justify-content: center;
+          font-family: var(--font-mono);
+          font-size: 10px;
           font-weight: 500;
+          color: var(--fg);
+          background: var(--bg-elev-2);
+          border: 1px solid var(--border-strong);
+          border-bottom-width: 2px;
+          letter-spacing: 0.04em;
         }
         .tl-detail {
           margin-top: 16px;
