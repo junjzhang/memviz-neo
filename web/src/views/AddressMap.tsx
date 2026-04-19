@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { SegmentInfo, BlockInfo } from "../types/snapshot";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTopFrame } from "../utils";
+import { useDataStore } from "../stores/dataStore";
 
 interface Props {
   segments: SegmentInfo[];
@@ -14,6 +15,7 @@ interface HoverInfo {
 }
 
 export default function AddressMap({ segments, width }: Props) {
+  const framePool = useDataStore((s) => s.framePool);
   const [hover, setHover] = useState<HoverInfo | null>(null);
 
   if (!segments.length) return null;
@@ -106,8 +108,10 @@ export default function AddressMap({ segments, width }: Props) {
         >
           <div style={{ color: "var(--accent)" }}>{formatBytes(hover.block.size)}</div>
           <div style={{ color: "var(--fg-muted)" }}>{hover.block.state}</div>
-          {hover.block.top_frame && (
-            <div style={{ color: "var(--fg-muted)", marginTop: 2 }}>{hover.block.top_frame}</div>
+          {hover.block.top_frame_idx != null && hover.block.top_frame_idx >= 0 && (
+            <div style={{ color: "var(--fg-muted)", marginTop: 2 }}>
+              {formatTopFrame(hover.block.top_frame_idx, framePool)}
+            </div>
           )}
           <div style={{ color: "var(--fg-dim)" }}>0x{hover.block.address.toString(16)}</div>
         </div>

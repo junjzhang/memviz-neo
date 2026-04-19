@@ -15,7 +15,8 @@ export interface TreemapNode {
   children?: TreemapNode[];
   address?: number;
   state?: string;
-  top_frame?: string;
+  /** Index into RankData.framePool; -1 if unknown. */
+  top_frame_idx?: number;
 }
 
 export interface BlockInfo {
@@ -23,7 +24,8 @@ export interface BlockInfo {
   size: number;
   state: string;
   offset_in_segment: number;
-  top_frame?: string;
+  /** Index into RankData.framePool; -1 if unknown. */
+  top_frame_idx?: number;
 }
 
 export interface SegmentInfo {
@@ -37,6 +39,14 @@ export interface SegmentInfo {
 export interface TopAllocation {
   address: number;
   size: number;
-  source: string | null;
+  /** Index into RankData.framePool; -1 if unknown. */
+  source_idx: number;
   segment_type: string;
+}
+
+/** One frame record. framePool is a shared array; everything else refers by index. */
+export interface FrameRecord {
+  name: string;
+  filename: string;
+  line: number;
 }

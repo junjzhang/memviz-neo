@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { TopAllocation } from "../types/snapshot";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTopFrame } from "../utils";
+import { useDataStore } from "../stores/dataStore";
 
 interface Props {
   data: TopAllocation[];
@@ -12,6 +13,7 @@ type SortDir = "asc" | "desc";
 const PAGE_SIZE = 20;
 
 export default function TopAllocations({ data }: Props) {
+  const framePool = useDataStore((s) => s.framePool);
   const [sortKey, setSortKey] = useState<SortKey>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(0);
@@ -89,7 +91,7 @@ export default function TopAllocations({ data }: Props) {
                     maxWidth: 0,
                   }}
                 >
-                  {row.source ?? "—"}
+                  {formatTopFrame(row.source_idx, framePool) || "—"}
                 </td>
                 <td className="mono" style={{ fontSize: 11 }}>
                   0x{row.address.toString(16)}

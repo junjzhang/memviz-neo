@@ -37,7 +37,8 @@ export interface TimelineBlock {
   free_requested_us: number; // -1 if no free_requested event
   free_us: number;
   alive: boolean;
-  top_frame: string;
+  /** Index into RankData.framePool; -1 if unknown. */
+  top_frame_idx: number;
   idx: number;
   stripOffset: number;
   stripCount: number;

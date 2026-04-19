@@ -1,7 +1,8 @@
 import { useMemo, useState, useCallback } from "react";
 import * as d3Hierarchy from "d3-hierarchy";
 import type { TreemapNode } from "../types/snapshot";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTopFrame } from "../utils";
+import { useDataStore } from "../stores/dataStore";
 
 interface Props {
   data: TreemapNode;
@@ -27,6 +28,7 @@ interface HoverInfo {
 }
 
 export default function Treemap({ data, width, height }: Props) {
+  const framePool = useDataStore((s) => s.framePool);
   const [drillPath, setDrillPath] = useState<string[]>([]);
   const [hover, setHover] = useState<HoverInfo | null>(null);
 
@@ -203,8 +205,10 @@ export default function Treemap({ data, width, height }: Props) {
         >
           <div style={{ color: "var(--fg)", marginBottom: 2, fontWeight: 500 }}>{hover.data.name}</div>
           <div style={{ color: "var(--accent)" }}>{formatBytes(hover.data.size)}</div>
-          {hover.data.top_frame && (
-            <div style={{ color: "var(--fg-muted)", marginTop: 2 }}>{hover.data.top_frame}</div>
+          {hover.data.top_frame_idx != null && hover.data.top_frame_idx >= 0 && (
+            <div style={{ color: "var(--fg-muted)", marginTop: 2 }}>
+              {formatTopFrame(hover.data.top_frame_idx, framePool)}
+            </div>
           )}
           {hover.data.address != null && (
             <div style={{ color: "var(--fg-dim)" }}>0x{hover.data.address.toString(16)}</div>

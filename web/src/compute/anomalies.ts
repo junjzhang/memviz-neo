@@ -12,7 +12,8 @@ export interface Anomaly {
   alloc_us: number;
   free_us: number; // -1 if alive
   size: number;
-  top_frame: string;
+  /** Index into RankData.framePool; -1 if unknown. */
+  top_frame_idx: number;
 }
 
 const PENDING_FREE_THRESHOLD_US = 1000; // 1ms
@@ -36,7 +37,7 @@ export function detectAnomalies(allocations: Allocation[], timeMax: number): Ano
           alloc_us: a.alloc_us,
           free_us: a.free_us,
           size: a.size,
-          top_frame: a.top_frame,
+          top_frame_idx: a.top_frame_idx,
         });
       }
     }
@@ -53,7 +54,7 @@ export function detectAnomalies(allocations: Allocation[], timeMax: number): Ano
         alloc_us: a.alloc_us,
         free_us: -1,
         size: a.size,
-        top_frame: a.top_frame,
+        top_frame_idx: a.top_frame_idx,
       });
     }
 

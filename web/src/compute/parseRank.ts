@@ -1,67 +1,93 @@
 // Pure parse: WASM JSON output → RankData. Runs inside Web Workers so the
 // main thread never blocks on JSON.parse, treemap building, anomaly
 // detection, or Float32 strip packing. No DOM / WebGL imports allowed here.
+//
+// Post-P0: WASM emits interned frame_pool + stack_pool and every reference
+// (block top_frame, alloc top_frame, stack trace) is a u32 index. Parsing
+// is now an index-plumbing exercise — no frame strings duplicated per
+// allocation.
 
-import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation } from "../types/snapshot";
+import type { RankSummary, TreemapNode, SegmentInfo, TopAllocation, FrameRecord } from "../types/snapshot";
 import type { TimelineBlock } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
 import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
-import type { Allocation, RankData, AllocationLite } from "./index";
+import type { Allocation, RankData } from "./index";
 import { STRIP_PALETTE_RGB } from "./palette";
 
 export interface ParseResult {
   data: RankData;
-  /**
-   * Full allocation records (addr/size/time/top_frame/frames) kept
-   * worker-local. Never crosses the message boundary at load time —
-   * every structured-clone byte of this would be main-thread jank.
-   * Fetched lazily via pool.getDetail(rank, addr).
-   */
-  detailsByAddr: Map<number, {
-    addr: number;
-    size: number;
-    alloc_us: number;
-    free_us: number;
-    top_frame: string;
-    frames: { name: string; filename: string; line: number }[];
-  }>;
+}
+
+function formatTopFrame(idx: number, framePool: FrameRecord[]): string {
+  if (idx < 0 || idx >= framePool.length) return "";
+  const f = framePool[idx];
+  // Match the old Rust top_frame formatter: "name @ basename:line" for .py,
+  // else just a trimmed name. Used only for UI display / treemap labels.
+  const name = f.name.split("(")[0].split("<")[0].trim();
+  if (f.filename.includes(".py")) {
+    const slash = f.filename.lastIndexOf("/");
+    const short = slash >= 0 ? f.filename.slice(slash + 1) : f.filename;
+    return `${name} @ ${short}:${f.line}`;
+  }
+  return name.length > 60 ? name.slice(0, 57) + "..." : name;
 }
 
 export function parseRank(json: string, _rank: number): ParseResult {
   const raw = JSON.parse(json);
   const summary: RankSummary = raw.summary;
 
-  const detailsByAddr = new Map<number, any>();
-  // Full allocations go to detectAnomalies only; nothing survives the
-  // function except small derived structures.
-  const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => {
-    detailsByAddr.set(a.addr, {
-      addr: a.addr,
-      size: a.size,
-      alloc_us: a.alloc_us,
-      free_us: a.free_us,
-      top_frame: a.top_frame,
-      frames: a.frames || [],
-    });
-    return {
-      addr: a.addr,
-      size: a.size,
-      alloc_us: a.alloc_us,
-      free_requested_us: a.free_requested_us,
-      free_us: a.free_us,
-      top_frame: a.top_frame,
-    } satisfies AllocationLite as any;
-  });
-  // detectAnomalies uses addr/size/time/top_frame; it doesn't need frames.
+  // ---- Frame / stack pools ----
+  const rawFramePool: [string, string, number][] = raw.frame_pool || [];
+  const framePool: FrameRecord[] = rawFramePool.map(([name, filename, line]) => ({
+    name,
+    filename,
+    line,
+  }));
+  const rawStackPool: number[][] = raw.stack_pool || [];
+  const stackPool: Uint32Array[] = rawStackPool.map((arr) => Uint32Array.from(arr));
+
+  // ---- Allocations (worker-local, used only for anomaly detection below) ----
+  const allocations: Allocation[] = (raw.alloc_details || []).map((a: any) => ({
+    addr: a.addr,
+    size: a.size,
+    alloc_us: a.alloc_us,
+    free_requested_us: a.free_requested_us,
+    free_us: a.free_us,
+    top_frame_idx: a.top_frame_idx,
+    stack_idx: a.stack_idx,
+  }));
   const anomalies: Anomaly[] = detectAnomalies(allocations, raw.timeline.time_max);
 
+  // stackByAddr index so the main thread can resolve a detail panel's
+  // stack without another worker round-trip. Small: top 3000 addrs × ~24B.
+  const stackByAddr = new Map<
+    number,
+    { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }
+  >();
+  for (const a of allocations) {
+    stackByAddr.set(a.addr, {
+      stack_idx: a.stack_idx,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_us: a.free_us,
+      top_frame_idx: a.top_frame_idx,
+    });
+  }
+
+  // ---- Segments (treemap / address map / top allocations) ----
   const segments: SegmentInfo[] = (raw.segments || []).map((s: any) => ({
     address: s.address,
     total_size: s.total_size,
     allocated_size: s.allocated_size,
     segment_type: s.segment_type,
-    blocks: s.blocks || [],
+    blocks: (s.blocks || []).map((b: any) => ({
+      address: b.address,
+      size: b.size,
+      state: b.state,
+      offset_in_segment: b.offset_in_segment,
+      top_frame_idx: b.top_frame_idx,
+    })),
   }));
   segments.sort((a, b) => b.total_size - a.total_size);
 
@@ -74,16 +100,16 @@ export function parseRank(json: string, _rank: number): ParseResult {
       if (b.state !== "active_allocated") continue;
       if (b.size >= 1048576) {
         segChildren.push({
-          name: b.top_frame || `0x${b.address.toString(16)}`,
+          name: b.top_frame_idx >= 0 ? formatTopFrame(b.top_frame_idx, framePool) : `0x${b.address.toString(16)}`,
           size: b.size,
           address: b.address,
           state: b.state,
-          top_frame: b.top_frame,
+          top_frame_idx: b.top_frame_idx,
         });
         topAllocations.push({
           address: b.address,
           size: b.size,
-          source: b.top_frame,
+          source_idx: b.top_frame_idx,
           segment_type: seg.segment_type,
         });
       } else {
@@ -120,16 +146,18 @@ export function parseRank(json: string, _rank: number): ParseResult {
   };
   topAllocations.sort((a, b) => b.size - a.size);
 
-  // Pre-pack strip buffer for WebGL + record per-block [offset, count]
-  // so the main thread can locate each block's strips in the buffer
-  // without cloning a strips: Strip[] array across the boundary.
-  //
-  // Subtract time_min first: real PyTorch traces use absolute Unix
-  // timestamps (~1.77e15), which collapse to zero-width quads when
-  // stored as Float32 without normalization.
-  const rawBlocks = raw.blocks as (TimelineBlock & {
+  // Pre-pack strip buffer for WebGL (time normalized vs data.time_min).
+  const rawBlocks = raw.blocks as {
+    addr: number;
+    size: number;
+    alloc_us: number;
+    free_requested_us: number;
+    free_us: number;
+    alive: boolean;
+    top_frame_idx: number;
+    idx: number;
     strips: { t_start: number; t_end: number; y_offset: number }[];
-  })[];
+  }[];
   const timeOrigin: number = raw.timeline.time_min;
   let stripCount = 0;
   let maxBytesFull = 0;
@@ -159,8 +187,6 @@ export function parseRank(json: string, _rank: number): ParseResult {
       stripBuffer[off + 6] = bl;
       stripIdx++;
     }
-    // Emit a strips-free TimelineBlock — the heavy strips array never
-    // leaves the worker.
     timelineBlocks[bi] = {
       addr: block.addr,
       size: block.size,
@@ -168,16 +194,12 @@ export function parseRank(json: string, _rank: number): ParseResult {
       free_requested_us: block.free_requested_us,
       free_us: block.free_us,
       alive: block.alive,
-      top_frame: block.top_frame,
+      top_frame_idx: block.top_frame_idx,
       idx: block.idx,
       stripOffset: startStripIdx,
       stripCount: block.strips.length,
     };
   }
-
-  // Discard the big `allocations` array before returning — detectAnomalies
-  // consumed it and we don't want to clone it across the worker boundary.
-  void allocations;
 
   const data: RankData = {
     summary,
@@ -197,6 +219,9 @@ export function parseRank(json: string, _rank: number): ParseResult {
     stripBuffer,
     stripCount,
     maxBytesFull: (maxBytesFull || raw.timeline.peak_bytes) * 1.1,
+    framePool,
+    stackPool,
+    stackByAddr,
   };
-  return { data, detailsByAddr };
+  return { data };
 }

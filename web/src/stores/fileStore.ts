@@ -11,13 +11,9 @@ import {
 
 type FileReader = () => Promise<ArrayBuffer>;
 
-// Active pool is kept alive after parsing finishes so the main thread can
-// ask workers for per-allocation stack traces on demand. Terminated on reset.
+// Active pool lives until the next dataset is loaded or reset is called.
+// Kept around so opening another directory reuses the compiled WASM module.
 let activePool: WorkerPool | null = null;
-
-export function getActivePool(): WorkerPool | null {
-  return activePool;
-}
 
 const WORKER_COUNT_KEY = "memviz.workerCount";
 const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;

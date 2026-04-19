@@ -4,6 +4,7 @@ import type {
   TreemapNode,
   SegmentInfo,
   TopAllocation,
+  FrameRecord,
 } from "../types/snapshot";
 import type {
   TimelineData,
@@ -11,7 +12,6 @@ import type {
   AllocationDetail,
 } from "../types/timeline";
 import type { RankData, Anomaly } from "../compute";
-import { getActivePool } from "./fileStore";
 
 interface DataState {
   ranks: number[];
@@ -24,6 +24,8 @@ interface DataState {
   timeline: TimelineData | null;
   timelineBlocks: TimelineBlock[];
   anomalies: Anomaly[];
+  /** Interned frame pool for the current rank. UI looks up top_frame_idx into this. */
+  framePool: FrameRecord[];
   // Pre-packed WebGL strip data — zero-copy on rank switch
   timelineStripBuffer: Float32Array | null;
   timelineStripCount: number;
@@ -37,7 +39,8 @@ interface DataState {
 
   setCurrentRank: (rank: number) => void;
   loadFromFiles: (rankData: Map<number, RankData>) => void;
-  getDetail: (rank: number, addr: number) => Promise<AllocationDetail | null>;
+  /** Resolve a block's detail synchronously via framePool / stackPool. */
+  getDetail: (rank: number, addr: number) => AllocationDetail | null;
   focusAnomaly: (anomaly: Anomaly) => void;
   clearFocus: () => void;
   resetData: () => void;
@@ -53,6 +56,7 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     timeline: data.timeline,
     timelineBlocks: data.timelineBlocks,
     anomalies: data.anomalies,
+    framePool: data.framePool,
     timelineStripBuffer: data.stripBuffer,
     timelineStripCount: data.stripCount,
     timelineMaxBytesFull: data.maxBytesFull,
@@ -73,6 +77,7 @@ export const useDataStore = create<DataState>((set, get) => ({
   timeline: null,
   timelineBlocks: [],
   anomalies: [],
+  framePool: [],
   timelineStripBuffer: null,
   timelineStripCount: 0,
   timelineMaxBytesFull: 0,
@@ -117,12 +122,42 @@ export const useDataStore = create<DataState>((set, get) => ({
     }
   },
 
-  getDetail: async (rank: number, addr: number): Promise<AllocationDetail | null> => {
-    // All allocation detail (size/time/top_frame + frames) is kept worker-
-    // local. Fetch the complete record in a single round-trip.
-    const pool = getActivePool();
-    if (!pool) return null;
-    return pool.getDetail(rank, addr);
+  getDetail: (rank: number, addr: number): AllocationDetail | null => {
+    // Resolve synchronously via the interned pools already on the main
+    // thread — no worker round-trip, no async wait.
+    const rd = get()._rankCache.get(rank);
+    if (!rd) return null;
+    const entry = rd.stackByAddr.get(addr);
+    if (!entry) return null;
+    const stack = rd.stackPool[entry.stack_idx];
+    const frames = stack
+      ? Array.from(stack, (fi) => {
+          const f = rd.framePool[fi];
+          return f ? { name: f.name, filename: f.filename, line: f.line }
+                   : { name: "", filename: "", line: 0 };
+        })
+      : [];
+    const topFrame =
+      entry.top_frame_idx >= 0 && rd.framePool[entry.top_frame_idx]
+        ? (() => {
+            const f = rd.framePool[entry.top_frame_idx];
+            const n = f.name.split("(")[0].split("<")[0].trim();
+            if (f.filename.includes(".py")) {
+              const i = f.filename.lastIndexOf("/");
+              const short = i >= 0 ? f.filename.slice(i + 1) : f.filename;
+              return `${n} @ ${short}:${f.line}`;
+            }
+            return n.length > 60 ? n.slice(0, 57) + "..." : n;
+          })()
+        : "";
+    return {
+      addr,
+      size: entry.size,
+      alloc_us: entry.alloc_us,
+      free_us: entry.free_us,
+      top_frame: topFrame,
+      frames,
+    };
   },
 
   focusAnomaly: (anomaly: Anomaly) => {
@@ -145,6 +180,7 @@ export const useDataStore = create<DataState>((set, get) => ({
     timeline: null,
     timelineBlocks: [],
     anomalies: [],
+    framePool: [],
     timelineStripBuffer: null,
     timelineStripCount: 0,
     timelineMaxBytesFull: 0,

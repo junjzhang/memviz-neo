@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import type { Anomaly } from "../compute";
 import { useDataStore } from "../stores/dataStore";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTopFrame } from "../utils";
 
 const TYPE_LABELS: Record<string, string> = {
   pending_free: "Pending Free",
@@ -18,6 +18,7 @@ const PAGE_SIZE = 20;
 export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
   const focusAnomaly = useDataStore((s) => s.focusAnomaly);
   const focusedAddr = useDataStore((s) => s.focusedAddr);
+  const framePool = useDataStore((s) => s.framePool);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [filter, setFilter] = useState<"all" | "pending_free" | "leak">("all");
@@ -129,7 +130,7 @@ export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
                         maxWidth: 0,
                       }}
                     >
-                      {a.top_frame || "?"}
+                      {formatTopFrame(a.top_frame_idx, framePool) || "?"}
                     </td>
                   </tr>
                   {isExpanded && a.detail && (

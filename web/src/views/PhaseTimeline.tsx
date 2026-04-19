@@ -5,7 +5,7 @@ import type {
   AllocationDetail,
 } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTopFrame } from "../utils";
 import { useDataStore } from "../stores/dataStore";
 import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
 
@@ -94,7 +94,10 @@ export default function PhaseTimeline({
   const [selectedBlock, setSelectedBlock] = useState<TimelineBlock | null>(null);
   const [detail, setDetail] = useState<AllocationDetail | null>(null);
   const [hoverBlock, setHoverBlock] = useState<TimelineBlock | null>(null);
-  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  // Previously held the pixel pos of the cursor-following tooltip. The
+  // hover card is now pinned to the plot's top-right so pos isn't needed,
+  // but the setter is kept to preserve the existing mouse-move flow.
+  const [, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const [selRect, setSelRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const selStartRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -126,11 +129,8 @@ export default function PhaseTimeline({
       const block = blocks.find((b) => b.addr === focusedAddr) ?? null;
       setSelectedBlock(block);
       if (block) {
-        let cancelled = false;
-        useDataStore.getState().getDetail(currentRank, block.addr).then((d) => {
-          if (!cancelled) setDetail(d);
-        });
-        return () => { cancelled = true; };
+        const d = useDataStore.getState().getDetail(currentRank, block.addr);
+        setDetail(d);
       }
     }
   }, [focusedAddr, blocks, currentRank]);
@@ -149,6 +149,7 @@ export default function PhaseTimeline({
   const maxBytesFull = useDataStore((s) => s.timelineMaxBytesFull);
   const stripBuffer = useDataStore((s) => s.timelineStripBuffer);
   const stripCount = useDataStore((s) => s.timelineStripCount);
+  const framePool = useDataStore((s) => s.framePool);
 
   const maxBytes = useMemo(() => {
     const [tMin, tMax] = viewRange;
@@ -294,7 +295,7 @@ export default function PhaseTimeline({
             }
           }
           if (bestW < 100 || bestH < 14) continue;
-          const label = block.top_frame || `0x${block.addr.toString(16)}`;
+          const label = formatTopFrame(block.top_frame_idx, framePool) || `0x${block.addr.toString(16)}`;
           const maxChars = Math.floor(bestW / 6.5);
           const text = label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
           ctx.fillStyle = "rgba(250,250,250,0.95)";
@@ -703,12 +704,8 @@ export default function PhaseTimeline({
               if (Math.abs(mx - fx) < FLAG_SIZE) {
                 const block = blocks.find((b) => b.addr === anomaly.addr) ?? null;
                 setSelectedBlock(block);
-                setDetail(null);
-                if (block) {
-                  useDataStore.getState().getDetail(currentRank, block.addr).then((d) => {
-                    if (d) setDetail(d);
-                  });
-                }
+                const d = useDataStore.getState().getDetail(currentRank, anomaly.addr);
+                setDetail(d);
                 selStartRef.current = null;
                 setSelRect(null);
                 return;
@@ -717,12 +714,8 @@ export default function PhaseTimeline({
           }
           const hit = hitTest(mx, my);
           setSelectedBlock(hit);
-          setDetail(null);
-          if (hit) {
-            useDataStore.getState().getDetail(currentRank, hit.addr).then((d) => {
-              if (d) setDetail(d);
-            });
-          }
+          const d = hit ? useDataStore.getState().getDetail(currentRank, hit.addr) : null;
+          setDetail(d);
         }
       }
       selStartRef.current = null;
@@ -762,55 +755,70 @@ export default function PhaseTimeline({
           }}
           onDoubleClick={() => setViewRange([data.time_min, data.time_max])}
         />
-        {/* anomaly flag tooltip */}
-        {hoverAnomaly && (
+        {/* Pinned hover info — anchored top-right of the plot area so
+            it never sits under the cursor or hides strips. Stays empty
+            when nothing is hovered. */}
+        {(hoverBlock || hoverAnomaly) && (
           <div
-            className="tl-tooltip"
+            className="tl-hover-card"
             style={{
-              left: Math.min(hoverAnomaly.x + 12, width - 320),
-              top: Math.max(hoverAnomaly.y + 8, 4),
-              borderLeft: `2px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`,
+              right: MARGIN.right + 8,
+              top: MARGIN.top + 8,
+              borderLeft: hoverAnomaly
+                ? `2px solid ${ANOMALY_COLORS[hoverAnomaly.anomaly.type]}`
+                : "2px solid var(--accent)",
             }}
           >
-            <div
-              className="display"
-              style={{
-                color: ANOMALY_COLORS[hoverAnomaly.anomaly.type],
-                fontSize: 10,
-                letterSpacing: "0.14em",
-                textTransform: "uppercase",
-                marginBottom: 4,
-              }}
-            >
-              {hoverAnomaly.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect"}
-            </div>
-            <div className="mono" style={{ color: "var(--fg)", marginBottom: 2 }}>
-              {formatBytes(hoverAnomaly.anomaly.size)} · {hoverAnomaly.anomaly.label}
-            </div>
-            <div className="mono faint" style={{ fontSize: 10 }}>
-              {hoverAnomaly.anomaly.top_frame}
-            </div>
-          </div>
-        )}
-        {/* hover tooltip */}
-        {hoverBlock && hoverPos && !hoverAnomaly && (
-          <div
-            className="tl-tooltip"
-            style={{
-              left: Math.min(hoverPos.x + 12, width - 320),
-              top: Math.max(hoverPos.y - 70, 4),
-            }}
-          >
-            <div className="mono" style={{ color: "var(--fg)", fontSize: 13, marginBottom: 2 }}>
-              {formatBytes(hoverBlock.size)}
-            </div>
-            <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
-              {hoverBlock.top_frame || `0x${hoverBlock.addr.toString(16)}`}
-            </div>
-            <div className="mono faint" style={{ fontSize: 10 }}>
-              {((hoverBlock.free_us - hoverBlock.alloc_us) / 1e6).toFixed(4)}s
-              {hoverBlock.alive && " · alive"}
-            </div>
+            {hoverAnomaly ? (
+              <>
+                <div
+                  className="display"
+                  style={{
+                    color: ANOMALY_COLORS[hoverAnomaly.anomaly.type],
+                    fontSize: 10,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    marginBottom: 4,
+                  }}
+                >
+                  {hoverAnomaly.anomaly.type === "pending_free" ? "Pending Free" : "Leak Suspect"}
+                </div>
+                <div className="mono" style={{ color: "var(--fg)", fontSize: 13, marginBottom: 2 }}>
+                  {formatBytes(hoverAnomaly.anomaly.size)}
+                </div>
+                <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
+                  {hoverAnomaly.anomaly.label}
+                </div>
+                <div className="mono faint" style={{ fontSize: 10 }}>
+                  {formatTopFrame(hoverAnomaly.anomaly.top_frame_idx, framePool)}
+                </div>
+              </>
+            ) : hoverBlock ? (
+              <>
+                <div
+                  className="display"
+                  style={{
+                    color: "var(--fg-faint)",
+                    fontSize: 10,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    marginBottom: 4,
+                  }}
+                >
+                  Block
+                </div>
+                <div className="mono" style={{ color: "var(--fg)", fontSize: 14, marginBottom: 2 }}>
+                  {formatBytes(hoverBlock.size)}
+                </div>
+                <div className="mono" style={{ color: "var(--fg-muted)", fontSize: 11, marginBottom: 2 }}>
+                  {formatTopFrame(hoverBlock.top_frame_idx, framePool) || `0x${hoverBlock.addr.toString(16)}`}
+                </div>
+                <div className="mono faint" style={{ fontSize: 10 }}>
+                  {((hoverBlock.free_us - hoverBlock.alloc_us) / 1e6).toFixed(4)}s
+                  {hoverBlock.alive && " · alive"}
+                </div>
+              </>
+            ) : null}
           </div>
         )}
       </div>
@@ -918,6 +926,20 @@ export default function PhaseTimeline({
           line-height: 1.5;
           backdrop-filter: blur(12px);
           box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .tl-hover-card {
+          position: absolute;
+          background: rgba(10,10,11,0.55);
+          border: 1px solid rgba(42,42,47,0.6);
+          padding: 10px 14px;
+          font-size: 12px;
+          pointer-events: none;
+          max-width: 340px;
+          min-width: 180px;
+          line-height: 1.5;
+          backdrop-filter: blur(16px) saturate(1.1);
+          -webkit-backdrop-filter: blur(16px) saturate(1.1);
+          z-index: 3;
         }
         .tl-hint {
           display: flex;
