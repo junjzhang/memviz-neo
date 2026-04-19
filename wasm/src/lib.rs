@@ -291,9 +291,13 @@ pub fn process_snapshot(data: &[u8], rank: i32, layout_limit: i32) -> String {
     }
     j.push_str("],");
 
-    // Alloc details for lookup
+    // Alloc details for lookup — only the top_idx allocations the main
+    // thread actually renders. The rest are small enough that clicking one
+    // is effectively impossible; emitting their full stacks only bloats
+    // JSON, JS parse time, and the worker's detailCache.
     j.push_str("\"alloc_details\":[");
-    for (i, a) in allocs.iter().enumerate() {
+    for (i, &ai) in top_idx.iter().enumerate() {
+        let a = &allocs[ai];
         if i > 0 { j.push(','); }
         j.push_str(&format!("{{\"addr\":{},\"size\":{},\"alloc_us\":{},\"free_requested_us\":{},\"free_us\":{},\"top_frame\":{},\"frames\":[",
             a.addr, a.size, a.alloc_us, a.free_requested_us, a.free_us, json_str(&a.top_frame)));
