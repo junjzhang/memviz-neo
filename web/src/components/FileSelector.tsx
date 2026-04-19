@@ -12,45 +12,12 @@ const PHASE_LABEL: Record<string, string> = {
 };
 
 export default function FileSelector() {
-  const { status, phase, completedCount, inFlightCount, totalCount, error, fileNames, openDirectory, openFiles } =
+  const { status, phase, inFlightRanks, poolSize, error, openDirectory, openFiles } =
     useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
   if (status === "loading") {
-    const label = PHASE_LABEL[phase] || "Loading";
-    const progressPct =
-      totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
-    // Show currently-active file (first in-flight). Fallback to last finished.
-    const activeIdx = Math.min(completedCount, fileNames.length - 1);
-    const currentFile = fileNames[activeIdx] ?? "";
-
-    return (
-      <div className="fs-root">
-        <div className="fs-stage">
-          <div className="fs-eyebrow">
-            {label}
-            <span className="fs-eyebrow-dot" />
-          </div>
-          <div className="fs-bignum display">
-            {String(completedCount).padStart(2, "0")}
-            <span className="fs-bignum-unit"> / {String(totalCount).padStart(2, "0")}</span>
-          </div>
-          <div className="fs-progress-track">
-            <div className="fs-progress-bar" style={{ width: `${progressPct}%` }} />
-            <div className="fs-progress-indeterminate" />
-          </div>
-          <div className="fs-loading-meta mono">
-            <span>{currentFile || "\u00a0"}</span>
-            {inFlightCount > 0 && (
-              <span className="faint">
-                {inFlightCount} in flight
-              </span>
-            )}
-          </div>
-        </div>
-        <FsStyle />
-      </div>
-    );
+    return <LoadingView phase={phase} inFlightRanks={inFlightRanks} poolSize={poolSize} />;
   }
 
   return (
@@ -105,6 +72,76 @@ export default function FileSelector() {
       </div>
 
       {/* Decorative corner marks */}
+      <div className="fs-mark fs-mark-tl" />
+      <div className="fs-mark fs-mark-tr" />
+      <div className="fs-mark fs-mark-bl" />
+      <div className="fs-mark fs-mark-br" />
+
+      <FsStyle />
+    </div>
+  );
+}
+
+const PHASE_BIG: Record<string, string> = {
+  idle: "PREPARING",
+  compile_wasm: "COMPILING WASM",
+  init_workers: "SPAWNING WORKERS",
+  parsing: "PARSING SNAPSHOTS",
+  done: "FINALIZING",
+};
+
+function LoadingView({
+  phase,
+  inFlightRanks,
+  poolSize,
+}: {
+  phase: string;
+  inFlightRanks: number[];
+  poolSize: number;
+}) {
+  const bigLabel = PHASE_BIG[phase] || "LOADING";
+
+  // Render N slots. N = poolSize once known, else a default so the grid
+  // doesn't snap in. Align in-flight ranks into the first len slots.
+  const slots = poolSize > 0 ? poolSize : 8;
+  const cells: (number | null)[] = new Array(slots).fill(null);
+  for (let i = 0; i < Math.min(inFlightRanks.length, slots); i++) {
+    cells[i] = inFlightRanks[i];
+  }
+
+  return (
+    <div className="fs-root">
+      <div className="fs-stage">
+        <div className="fs-eyebrow">
+          {PHASE_LABEL[phase] || "Loading"}
+          <span className="fs-eyebrow-dot" />
+        </div>
+
+        <h1 className="fs-phase display">{bigLabel}</h1>
+
+        <div className="fs-worker-grid" data-slots={slots}>
+          {cells.map((rank, i) => (
+            <div
+              key={i}
+              className={"fs-worker-cell" + (rank !== null ? " is-busy" : "")}
+            >
+              <span className="fs-worker-idx mono">W{String(i).padStart(2, "0")}</span>
+              <span className="fs-worker-rank display">
+                {rank !== null ? `R${String(rank).padStart(2, "0")}` : "—"}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="fs-worker-cap mono">
+          <span>{poolSize > 0 ? `${poolSize} workers` : "initializing…"}</span>
+          <span className="faint">
+            {inFlightRanks.length > 0 && `${inFlightRanks.length} parsing`}
+          </span>
+        </div>
+      </div>
+
+      {/* Decorative corner marks reused from landing */}
       <div className="fs-mark fs-mark-tl" />
       <div className="fs-mark fs-mark-tr" />
       <div className="fs-mark fs-mark-bl" />
@@ -219,70 +256,77 @@ function FsStyle() {
         50%      { opacity: 1; transform: scale(1.2); }
       }
 
-      .fs-bignum {
-        font-size: clamp(120px, 16vw, 220px);
-        font-weight: 500;
-        line-height: 0.85;
+      .fs-phase {
+        font-size: clamp(42px, 6vw, 84px);
+        font-weight: 600;
+        line-height: 0.95;
+        letter-spacing: -0.02em;
         color: var(--fg);
-        font-variant-numeric: tabular-nums;
-        margin: var(--s2) 0 var(--s5);
+        margin: 0 0 var(--s7);
       }
-      .fs-bignum-unit {
-        font-size: 0.28em;
-        color: var(--fg-faint);
-        margin-left: 0.2em;
-        vertical-align: 0.5em;
-        font-weight: 400;
+
+      .fs-worker-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+        gap: 10px;
+        max-width: 900px;
+        margin-bottom: var(--s5);
       }
-      .fs-progress-track {
+      .fs-worker-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        background: var(--bg-elev);
         position: relative;
+        transition: border-color 200ms var(--ease), background 200ms var(--ease);
+      }
+      .fs-worker-cell.is-busy {
+        border-color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .fs-worker-cell.is-busy::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
         height: 2px;
-        background: var(--border);
-        width: 560px;
-        max-width: 100%;
-        overflow: hidden;
-      }
-      .fs-progress-bar {
-        position: absolute;
-        top: 0; left: 0;
-        height: 100%;
         background: var(--accent);
-        transition: width 300ms var(--ease);
+        animation: fs-busy-stripe 1.6s ease-in-out infinite;
       }
-      /* Indeterminate sweep — always running while loading, so the bar
-         never appears frozen even when completed=0. */
-      .fs-progress-indeterminate {
-        position: absolute;
-        top: 0;
-        height: 100%;
-        width: 30%;
-        background: linear-gradient(
-          90deg,
-          transparent 0%,
-          rgba(217, 249, 157, 0.45) 50%,
-          transparent 100%
-        );
-        animation: fs-sweep 1.8s ease-in-out infinite;
+      @keyframes fs-busy-stripe {
+        0%, 100% { opacity: 0.55; }
+        50%      { opacity: 1;    }
       }
-      @keyframes fs-sweep {
-        0%   { left: -30%; }
-        100% { left: 100%; }
-      }
-      .fs-loading-meta {
-        margin-top: var(--s3);
-        font-size: 11px;
+      .fs-worker-idx {
+        font-size: 9px;
+        letter-spacing: 0.18em;
         color: var(--fg-faint);
+      }
+      .fs-worker-cell.is-busy .fs-worker-idx {
+        color: var(--accent-dim);
+      }
+      .fs-worker-rank {
+        font-size: 22px;
+        font-weight: 500;
+        letter-spacing: -0.01em;
+        color: var(--fg-dim);
+        font-variant-numeric: tabular-nums;
+      }
+      .fs-worker-cell.is-busy .fs-worker-rank {
+        color: var(--accent);
+      }
+
+      .fs-worker-cap {
         display: flex;
         justify-content: space-between;
         gap: var(--s4);
-        max-width: 560px;
-        white-space: nowrap;
-        overflow: hidden;
-      }
-      .fs-loading-meta > span:first-child {
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        max-width: 900px;
+        padding-top: var(--s3);
+        border-top: 1px solid var(--divider);
+        font-size: 11px;
+        color: var(--fg-faint);
+        letter-spacing: 0.02em;
       }
 
       /* Corner marks */

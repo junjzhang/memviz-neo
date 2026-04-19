@@ -34,10 +34,20 @@ export interface WorkerPool {
   terminate: () => void;
 }
 
+export interface ProgressSnapshot {
+  completed: number;
+  inFlight: number;
+  total: number;
+  phase: LoadPhase;
+  /** Ranks currently being parsed (one entry per active worker). */
+  inFlightRanks: number[];
+  poolSize: number;
+}
+
 export function createWorkerPool(
   onResult: (result: WorkerResult) => void,
   onError: (rank: number, error: string) => void,
-  onProgress: (completed: number, inFlight: number, total: number, phase: LoadPhase) => void,
+  onProgress: (snap: ProgressSnapshot) => void,
 ): WorkerPool {
   const poolSize = Math.min(navigator.hardwareConcurrency || 4, 8);
   const workers: Worker[] = [];
@@ -76,12 +86,27 @@ export function createWorkerPool(
     if (terminated || tasks.length === 0) return;
 
     const total = tasks.length;
-    onProgress(0, 0, total, "compile_wasm");
+    // Maps worker index → the rank it's currently parsing (or -1 if idle).
+    const workerCurrentRank = new Array(workers.length).fill(-1);
+    const snap = (completed: number, phase: LoadPhase): ProgressSnapshot => {
+      const inFlightRanks: number[] = [];
+      for (const r of workerCurrentRank) if (r >= 0) inFlightRanks.push(r);
+      return {
+        completed,
+        inFlight: inFlightRanks.length,
+        total,
+        phase,
+        inFlightRanks,
+        poolSize: workers.length,
+      };
+    };
+
+    onProgress(snap(0, "compile_wasm"));
 
     const wasmBytes = await fetch(wasmUrl).then((r) => r.arrayBuffer());
     const wasmModule = await WebAssembly.compile(wasmBytes);
 
-    onProgress(0, 0, total, "init_workers");
+    onProgress(snap(0, "init_workers"));
 
     await Promise.all(workers.map((w) => new Promise<void>((resolve, reject) => {
       w.onmessage = (e) => {
@@ -92,16 +117,16 @@ export function createWorkerPool(
     })));
 
     let completed = 0;
-    let inFlight = 0;
     let nextIdx = 0;
 
-    onProgress(0, 0, total, "parsing");
+    onProgress(snap(0, "parsing"));
 
     await new Promise<void>((resolve) => {
       function done(worker: Worker) {
         completed++;
-        inFlight = Math.max(0, inFlight - 1);
-        onProgress(completed, inFlight, total, completed >= total ? "done" : "parsing");
+        const wIdx = workers.indexOf(worker);
+        workerCurrentRank[wIdx] = -1;
+        onProgress(snap(completed, completed >= total ? "done" : "parsing"));
         if (completed >= total) resolve();
         else dispatch(worker);
       }
@@ -109,10 +134,10 @@ export function createWorkerPool(
       function dispatch(worker: Worker) {
         if (nextIdx >= tasks.length) return;
         const task = tasks[nextIdx++];
-        inFlight++;
-        onProgress(completed, inFlight, total, "parsing");
         const wIdx = workers.indexOf(worker);
+        workerCurrentRank[wIdx] = task.rank;
         rankWorker.set(task.rank, wIdx);
+        onProgress(snap(completed, "parsing"));
         task.getBuffer().then((buffer) => {
           worker.postMessage({ type: "process", rank: task.rank, buffer }, [buffer]);
         }).catch((err) => {

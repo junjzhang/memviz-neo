@@ -6,6 +6,7 @@ import {
   type WorkerResult,
   type WorkerTask,
   type LoadPhase,
+  type ProgressSnapshot,
 } from "../compute/workerPool";
 
 type FileReader = () => Promise<ArrayBuffer>;
@@ -26,6 +27,10 @@ interface FileState {
   completedCount: number;
   inFlightCount: number;
   totalCount: number;
+  /** Rank numbers currently being parsed (one per active worker). */
+  inFlightRanks: number[];
+  /** Size of the worker pool (constant within a load). */
+  poolSize: number;
   error: string | null;
   ranks: number[];
   rankData: Map<number, RankData>;
@@ -48,6 +53,8 @@ export const useFileStore = create<FileState>((set) => ({
   completedCount: 0,
   inFlightCount: 0,
   totalCount: 0,
+  inFlightRanks: [],
+  poolSize: 0,
   error: null,
   ranks: [],
   rankData: new Map(),
@@ -89,6 +96,8 @@ export const useFileStore = create<FileState>((set) => ({
       completedCount: 0,
       inFlightCount: 0,
       totalCount: 0,
+      inFlightRanks: [],
+      poolSize: 0,
       error: null,
       ranks: [],
       rankData: new Map(),
@@ -112,6 +121,8 @@ async function loadAllParallel(
     completedCount: 0,
     inFlightCount: 0,
     totalCount: entries.length,
+    inFlightRanks: [],
+    poolSize: 0,
     error: null,
     ranks,
   });
@@ -155,13 +166,15 @@ async function loadAllParallel(
     (rank, error) => {
       console.error(`[memviz] rank ${rank} failed:`, error);
     },
-    (completed, inFlight, total, phase) => {
+    (snap: ProgressSnapshot) => {
       set({
-        progress: completed / total,
-        phase,
-        completedCount: completed,
-        inFlightCount: inFlight,
-        totalCount: total,
+        progress: snap.completed / snap.total,
+        phase: snap.phase,
+        completedCount: snap.completed,
+        inFlightCount: snap.inFlight,
+        totalCount: snap.total,
+        inFlightRanks: snap.inFlightRanks,
+        poolSize: snap.poolSize,
       });
     },
   );
