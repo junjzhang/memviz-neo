@@ -1,8 +1,7 @@
-import { useRef, useEffect, useState, useCallback, useMemo } from "react";
+import { useRef, useEffect, useCallback, useMemo } from "react";
 import type {
   TimelineData,
   TimelineAlloc,
-  AllocationDetail,
 } from "../types/timeline";
 import { STRIP_FLOATS } from "../types/timeline";
 import { formatBytes, formatTopFrame } from "../utils";
@@ -57,10 +56,6 @@ function formatTime(us: number): string {
   if (us < 1000) return `${us.toFixed(0)}\u00b5s`;
   if (us < 1e6) return `${(us / 1000).toFixed(2)}ms`;
   return `${(us / 1e6).toFixed(4)}s`;
-}
-
-function Kbd({ children }: { children: React.ReactNode }) {
-  return <kbd className="tl-kbd">{children}</kbd>;
 }
 
 function drawPill(ctx: CanvasRenderingContext2D, text: string, cx: number, cy: number) {
@@ -123,11 +118,6 @@ export default function PhaseTimeline({
   const visitedBIsRef = useRef<Uint32Array | null>(null);
   const visitGenRef = useRef<number>(0);
 
-  // React state only for click-selection / detail — both low-frequency.
-  // Hover lives in refs so 60 Hz cursor movement doesn't re-render.
-  const [selectedAlloc, setSelectedAlloc] = useState<TimelineAlloc | null>(null);
-  const [detail, setDetail] = useState<AllocationDetail | null>(null);
-
   const hoverAllocRef = useRef<TimelineAlloc | null>(null);
   const hoverAnomalyRef = useRef<{ anomaly: Anomaly; x: number; y: number } | null>(null);
   const hoverCardRef = useRef<HTMLDivElement>(null);
@@ -136,9 +126,24 @@ export default function PhaseTimeline({
   const hcSecondaryRef = useRef<HTMLDivElement>(null);
   const hcTertiaryRef = useRef<HTMLDivElement>(null);
 
+  // Selection lives in dataStore so SegmentTimeline can set it too.
+  // PhaseTimeline's only job on click is to call setSelectedAlloc — the
+  // selected rectangle we draw here is derived from that store field.
   const focusedAddr = useDataStore((s) => s.focusedAddr);
   const focusRange = useDataStore((s) => s.focusRange);
+  const storeSelectedAlloc = useDataStore((s) => s.selectedAlloc);
+  const setSelectedAlloc = useDataStore((s) => s.setSelectedAlloc);
   const animRef = useRef<number>(0);
+
+  const selectedAlloc = useMemo<TimelineAlloc | null>(
+    () => {
+      if (!storeSelectedAlloc) return null;
+      return allocs.find(
+        (a) => a.addr === storeSelectedAlloc.addr && a.alloc_us === storeSelectedAlloc.alloc_us,
+      ) ?? null;
+    },
+    [storeSelectedAlloc, allocs],
+  );
 
   useEffect(() => {
     if (!focusRange) return;
@@ -163,15 +168,12 @@ export default function PhaseTimeline({
   }, [focusRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (focusedAddr !== null) {
-      const alloc = allocs.find((b) => b.addr === focusedAddr) ?? null;
-      setSelectedAlloc(alloc);
-      if (alloc) {
-        const d = useDataStore.getState().getDetail(currentRank, alloc.addr);
-        setDetail(d);
-      }
-    }
-  }, [focusedAddr, allocs, currentRank]);
+    if (focusedAddr == null) return;
+    // Focus arrives as addr-only (from anomaly panel), so disambiguate
+    // via alloc_us by matching it against the in-memory allocs list.
+    const a = allocs.find((x) => x.addr === focusedAddr);
+    if (a) setSelectedAlloc({ addr: a.addr, alloc_us: a.alloc_us });
+  }, [focusedAddr, allocs, setSelectedAlloc]);
 
   const rulerDragRef = useRef<{ type: RulerType; startPx: { x: number; y: number } } | null>(null);
   const keysDownRef = useRef<Set<string>>(new Set());
@@ -261,7 +263,6 @@ export default function PhaseTimeline({
     }
     manualYRangeRef.current = null;
     setSelectedAlloc(null);
-    setDetail(null);
     rulerRef.current = null;
     invalidate();
   }, [data.time_min, data.time_max, xAxisMode, totalXRange]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -922,23 +923,15 @@ export default function PhaseTimeline({
         return;
       }
 
-      // Ctrl+C / Cmd+C copies stack trace
-      if (key === "c" && (e.ctrlKey || e.metaKey) && detail) {
-        const text = detail.frames
-          .filter(f => f.filename !== "??" && !f.name.includes("CUDACachingAllocator") && !f.filename.includes("memory_snapshot"))
-          .map(f => `${f.name} @ ${f.filename}:${f.line}`)
-          .join("\n");
-        navigator.clipboard.writeText(`${formatBytes(detail.size)} 0x${detail.addr.toString(16)}\n${text}`);
-        e.preventDefault();
-        return;
-      }
+      // Ctrl/Cmd+C copy trace is handled by <TimelineDetailPanel /> since
+      // that component owns the current AllocationDetail.
 
       // Navigation keys are handled by rAF loop below
       if ("adws".includes(key) || key.startsWith("arrow")) {
         e.preventDefault();
       }
     },
-    [detail],
+    [],
   );
 
   const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
@@ -1135,35 +1128,28 @@ export default function PhaseTimeline({
           }
           invalidate();
         } else {
-          // Click — flag or alloc selection
-          if (my < MARGIN.top && my >= MARGIN.top - FLAG_SIZE - 2) {
-            const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
-            for (let ai = 0; ai < flagLimit; ai++) {
-              const anomaly = anomalies[ai];
-              const fx = timeToX(anomaly.alloc_us);
-              if (Math.abs(mx - fx) < FLAG_SIZE) {
-                const alloc = allocs.find((b) => b.addr === anomaly.addr) ?? null;
-                setSelectedAlloc(alloc);
-                const d = useDataStore.getState().getDetail(currentRank, anomaly.addr);
-                setDetail(d);
-                selStartRef.current = null;
-                selRectRef.current = null;
-                invalidate();
-                return;
-              }
-            }
+          // Click → commit whatever hover was already locked on to. The
+          // rAF-tracked hoverAllocRef / hoverAnomalyRef is what the user
+          // was seeing in the hover card, so selecting the same thing is
+          // "what you see is what you pick" — avoids losing thin strips
+          // to 1-2 px mousedown drift that a fresh hitTest would catch.
+          const anomHover = hoverAnomalyRef.current;
+          if (anomHover) {
+            // Anomaly flags carry an addr only — resolve the exact
+            // alloc via alloc_us from the live list.
+            const a = allocs.find((x) => x.addr === anomHover.anomaly.addr);
+            setSelectedAlloc(a ? { addr: a.addr, alloc_us: a.alloc_us } : null);
+          } else {
+            const hit = hoverAllocRef.current ?? hitTest(mx, my);
+            setSelectedAlloc(hit ? { addr: hit.addr, alloc_us: hit.alloc_us } : null);
           }
-          const hit = hitTest(mx, my);
-          setSelectedAlloc(hit);
-          const d = hit ? useDataStore.getState().getDetail(currentRank, hit.addr) : null;
-          setDetail(d);
         }
       }
       selStartRef.current = null;
       selRectRef.current = null;
       invalidate();
     },
-    [hitTest, currentRank, anomalies, allocs, timeToX],
+    [hitTest, anomalies, timeToX, xToTime, yToBytes, plotW, plotH, xAxisMode, setSelectedAlloc, allocs],
   );
 
   const cursorStyle = rulerDragRef.current
@@ -1249,97 +1235,6 @@ export default function PhaseTimeline({
           />
         </div>
       </div>
-
-      {/* Always-visible keyboard shortcut bar, outside the canvas so it
-          never gets hidden by tooltips or dark plot backgrounds. */}
-      <div className="tl-hint mono">
-        <Kbd>WASD</Kbd>
-        <span>pan/zoom X</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>⇧WASD</Kbd>
-        <span>pan/zoom Y</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>R</Kbd><span>+drag</span>
-        <span>mem ruler</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>T</Kbd><span>+drag</span>
-        <span>time ruler</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>drag</Kbd>
-        <span>zoom to box</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>dblclick</Kbd>
-        <span>reset</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>Esc</Kbd>
-        <span>clear</span>
-        <span className="tl-hint-sep">·</span>
-        <Kbd>⌘C</Kbd>
-        <span>copy trace</span>
-      </div>
-
-      {/* detail panel */}
-      {detail && (
-        <div className="tl-detail">
-          <div className="tl-detail-head">
-            <div className="stat">
-              <span className="stat-label">Size</span>
-              <span className="stat-value" style={{ fontSize: 18 }}>{formatBytes(detail.size)}</span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">Duration</span>
-              <span className="stat-value" style={{ fontSize: 18 }}>
-                {detail.free_us === -1
-                  ? "alive"
-                  : `${((detail.free_us - detail.alloc_us) / 1e6).toFixed(4)}s`}
-              </span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">Address</span>
-              <span className="stat-value mono" style={{ fontSize: 14 }}>
-                0x{detail.addr.toString(16)}
-              </span>
-            </div>
-            <div
-              className="mono"
-              style={{
-                marginLeft: "auto",
-                alignSelf: "flex-end",
-                fontSize: 10,
-                color: "var(--fg-faint)",
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-              }}
-            >
-              ⌘C copy trace
-            </div>
-          </div>
-          <div className="tl-detail-trace mono">
-            {detail.frames
-              .filter(
-                (f) =>
-                  f.filename !== "??" &&
-                  !f.name.includes("CUDACachingAllocator") &&
-                  !f.filename.includes("memory_snapshot"),
-              )
-              .map((f, i) => {
-                const isPython = f.filename.includes(".py");
-                return (
-                  <div key={i} className="tl-frame" data-py={isPython ? "1" : "0"}>
-                    <span className="tl-frame-name">
-                      {f.name.length > 100 ? f.name.slice(0, 97) + "…" : f.name}
-                    </span>
-                    {f.filename && (
-                      <span className="tl-frame-loc">
-                        {" @ "}{f.filename.split("/").slice(-2).join("/")}:{f.line}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-          </div>
-        </div>
-      )}
 
       <style>{`
         .tl-tooltip {

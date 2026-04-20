@@ -87,8 +87,10 @@ export interface RankData {
   // come from stackPool[allocation.stack_idx].map(i => framePool[i]).
   framePool: FrameRecord[];
   stackPool: Uint32Array[];
-  /** Map addr → stack_idx for top-rendered allocations (used by getDetail). */
-  stackByAddr: Map<number, { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }>;
+  /** Map "addr-alloc_us" → stack for top-rendered allocations (used by
+   *  getDetail). Key is a string tuple because PyTorch reuses GPU
+   *  addresses, so `addr` alone can't uniquely identify an alloc. */
+  stackByIdentity: Map<string, { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }>;
 }
 
 export type { Anomaly } from "./anomalies";

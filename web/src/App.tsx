@@ -9,6 +9,7 @@ import AddressMap from "./views/AddressMap";
 import MultiRank from "./views/MultiRank";
 import AnomalyPanel from "./views/AnomalyPanel";
 import SegmentTimeline from "./views/SegmentTimeline";
+import { TimelineHints, TimelineDetailPanel } from "./views/TimelineDetail";
 import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
 import { useRankSummaries } from "./stores/rankStore";
@@ -176,7 +177,7 @@ function Dashboard() {
   const [gridRef, gridWidth] = useContainerWidth();
   const halfWidth = gridWidth > 0 ? Math.floor((gridWidth - 32) / 2) : 600;
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
-  const tlHeight = useViewportHeight(560, 220);
+  const tlHeight = useViewportHeight(480, 500);
 
   // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
   // read/write every frame so they follow each other without re-renders.
@@ -223,50 +224,50 @@ function Dashboard() {
                 <span className="mono faint" style={{ marginLeft: 12 }}>
                   {timelineAllocs.length} allocs
                 </span>
+                {segmentRows.length > 0 && (
+                  <span className="mono faint" style={{ marginLeft: 12 }}>
+                    · {segmentRows.length} segments
+                  </span>
+                )}
               </>
             }
           >
             {timeline && tlWidth > 0 ? (
-              <PhaseTimeline
-                data={timeline}
-                allocs={timelineAllocs}
-                anomalies={anomalies}
-                width={tlWidth}
-                height={tlHeight}
-                currentRank={currentRank}
-                viewRangeRef={viewRangeRef}
-              />
+              <>
+                <PhaseTimeline
+                  data={timeline}
+                  allocs={timelineAllocs}
+                  anomalies={anomalies}
+                  width={tlWidth}
+                  height={tlHeight}
+                  currentRank={currentRank}
+                  viewRangeRef={viewRangeRef}
+                />
+                {segmentRows.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      borderTop: "1px dashed var(--divider)",
+                      paddingTop: 4,
+                    }}
+                  >
+                    <SegmentTimeline
+                      data={timeline}
+                      rows={segmentRows}
+                      width={tlWidth}
+                      viewRangeRef={viewRangeRef}
+                      mode={xAxisMode}
+                      eventTimes={eventTimes}
+                    />
+                  </div>
+                )}
+                <TimelineHints />
+                <TimelineDetailPanel />
+              </>
             ) : (
               <Empty />
             )}
           </Section>
-
-          {/* Allocator state timeline — same X axis as Memory Timeline,
-              Y rows = allocator segments. Pan/zoom syncs via shared ref. */}
-          {timeline && segmentRows.length > 0 && tlWidth > 0 && (
-            <Section
-              eyebrow="02b"
-              title="Allocator Segments"
-              meta={
-                <>
-                  <span className="mono hl">{rankTag}</span>
-                  <span className="mono faint" style={{ marginLeft: 12 }}>
-                    {segmentRows.length} segments
-                  </span>
-                </>
-              }
-            >
-              <SegmentTimeline
-                data={timeline}
-                rows={segmentRows}
-                width={tlWidth}
-                height={Math.min(480, 24 + 36 + segmentRows.length * 26)}
-                viewRangeRef={viewRangeRef}
-                mode={xAxisMode}
-                eventTimes={eventTimes}
-              />
-            </Section>
-          )}
         </div>
 
         {anomalies.length > 0 && (

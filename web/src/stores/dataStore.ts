@@ -50,12 +50,18 @@ interface DataState {
   error: string | null;
   focusedAddr: number | null;
   focusRange: [number, number] | null;
+  /** Identifier of the allocation currently clicked in the Memory
+   *  Timeline. `addr` alone is ambiguous because PyTorch reuses GPU
+   *  addresses after free, so we key on (addr, alloc_us) which is
+   *  unique across the trace. Null = nothing selected. */
+  selectedAlloc: { addr: number; alloc_us: number } | null;
+  setSelectedAlloc: (a: { addr: number; alloc_us: number } | null) => void;
 
   /** Underlying RankData for the current rank (needed for getDetail). */
   _currentData: RankData | null;
 
   setCurrentRank: (rank: number) => Promise<void>;
-  getDetail: (rank: number, addr: number) => AllocationDetail | null;
+  getDetail: (rank: number, addr: number, alloc_us: number) => AllocationDetail | null;
   focusAnomaly: (anomaly: Anomaly) => void;
   clearFocus: () => void;
   resetData: () => void;
@@ -80,6 +86,7 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     flame: data.flame,
     focusedAddr: null,
     focusRange: null,
+    selectedAlloc: null,
     switching: false,
     _currentData: data,
   };
@@ -104,6 +111,7 @@ const emptyState: Partial<DataState> = {
   switching: false,
   focusedAddr: null,
   focusRange: null,
+  selectedAlloc: null,
   _currentData: null,
 };
 
@@ -135,6 +143,8 @@ export const useDataStore = create<DataState>((set, get) => ({
   error: null,
   focusedAddr: null,
   focusRange: null,
+  selectedAlloc: null,
+  setSelectedAlloc: (a) => set({ selectedAlloc: a }),
   _currentData: null,
 
   setCurrentRank: async (rank: number) => {
@@ -162,14 +172,17 @@ export const useDataStore = create<DataState>((set, get) => ({
     return promise;
   },
 
-  getDetail: (rank: number, addr: number): AllocationDetail | null => {
+  getDetail: (rank: number, addr: number, alloc_us: number): AllocationDetail | null => {
     // Detail resolution uses the currently-loaded rank's data. If user
     // requests detail for a rank that isn't current, they'd have had to
     // be viewing it (we only call getDetail from hover/click on the
     // active rank's timeline / treemap).
     const rd = get()._currentData;
     if (!rd || rd.summary.rank !== rank) return null;
-    const entry = rd.stackByAddr.get(addr);
+    // PyTorch reuses GPU addresses; key the lookup on the (addr,alloc_us)
+    // pair so we return the specific alloc the user clicked, not some
+    // later alloc that happened to land at the same address.
+    const entry = rd.stackByIdentity.get(`${addr}-${alloc_us}`);
     if (!entry) return null;
     const stack = rd.stackPool[entry.stack_idx];
     const frames = stack

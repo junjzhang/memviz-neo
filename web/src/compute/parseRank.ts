@@ -468,13 +468,14 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   }));
   const anomalies: Anomaly[] = detectAnomalies(allocations, timeMax);
 
-  // stackByAddr index for sync main-thread detail resolution.
-  const stackByAddr = new Map<
-    number,
+  // Detail lookup: keyed by "addr-alloc_us" so address reuse (PyTorch
+  // re-allocates freed GPU memory) doesn't collide.
+  const stackByIdentity = new Map<
+    string,
     { stack_idx: number; size: number; alloc_us: number; free_us: number; top_frame_idx: number }
   >();
   for (const a of allocations) {
-    stackByAddr.set(a.addr, {
+    stackByIdentity.set(`${a.addr}-${a.alloc_us}`, {
       stack_idx: a.stack_idx,
       size: a.size,
       alloc_us: a.alloc_us,
@@ -513,7 +514,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     flame,
     framePool,
     stackPool,
-    stackByAddr,
+    stackByIdentity,
   };
   return { data };
 }
