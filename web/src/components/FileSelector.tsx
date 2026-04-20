@@ -118,8 +118,8 @@ export default function FileSelector() {
             <span className="fs-fp-v mono">webgl2 · instanced</span>
           </div>
           <div className="fs-fp-item">
-            <span className="fs-fp-k">capacity</span>
-            <span className="fs-fp-v mono">128 ranks · 1GB each</span>
+            <span className="fs-fp-k">scope</span>
+            <span className="fs-fp-v mono">multi-rank · parallel parse</span>
           </div>
         </div>
       </div>
