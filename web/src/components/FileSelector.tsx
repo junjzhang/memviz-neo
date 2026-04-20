@@ -34,9 +34,14 @@ export default function FileSelector() {
     <div className="fs-root">
       <div className="fs-stage">
         <div className="fs-eyebrow">PyTorch · GPU Memory · Frontend-Only</div>
-        <h1 className="fs-title display">
-          memviz
-          <span className="fs-title-neo">/neo</span>
+        <h1 className="fs-title display" aria-label="memviz/neo">
+          <span className="fs-title-track">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <span className="fs-title-text" key={i} aria-hidden={i > 0 ? true : undefined}>
+                memviz<span className="fs-title-neo">/neo</span>
+              </span>
+            ))}
+          </span>
         </h1>
         <p className="fs-lede">
           Drop in a directory of <span className="mono hl">rank*.pickle</span> snapshots.
@@ -119,6 +124,12 @@ export default function FileSelector() {
         </div>
       </div>
 
+      {/* Blurred color blobs instead of a grid — big soft washes of the
+          brand palette bleeding behind the stage. */}
+      <div className="fs-blob fs-blob-a" />
+      <div className="fs-blob fs-blob-b" />
+      <div className="fs-blob fs-blob-c" />
+
       {/* Decorative corner marks */}
       <div className="fs-mark fs-mark-tl" />
       <div className="fs-mark fs-mark-tr" />
@@ -189,6 +200,10 @@ function LoadingView({
         </div>
       </div>
 
+      <div className="fs-blob fs-blob-a" />
+      <div className="fs-blob fs-blob-b" />
+      <div className="fs-blob fs-blob-c" />
+
       {/* Decorative corner marks reused from landing */}
       <div className="fs-mark fs-mark-tl" />
       <div className="fs-mark fs-mark-tr" />
@@ -210,25 +225,40 @@ function FsStyle() {
         display: flex;
         align-items: center;
         justify-content: flex-start;
-        padding: 0 var(--s9);
+        padding: 0 clamp(24px, 5vw, 72px);
         overflow: hidden;
       }
-      .fs-root::before {
-        content: "";
+      /* Soft accent blobs float behind everything; heavy blur so they
+         read as atmosphere, not shapes. */
+      .fs-blob {
         position: absolute;
-        inset: 0;
-        background-image:
-          linear-gradient(to right, var(--divider) 1px, transparent 1px),
-          linear-gradient(to bottom, var(--divider) 1px, transparent 1px);
-        background-size: 64px 64px;
-        mask-image: radial-gradient(ellipse at 30% 40%, #000 0%, transparent 70%);
-        -webkit-mask-image: radial-gradient(ellipse at 30% 40%, #000 0%, transparent 70%);
+        border-radius: 50%;
+        filter: blur(120px);
         pointer-events: none;
+        z-index: 0;
+      }
+      .fs-blob-a {
+        top: -8vw; left: -10vw;
+        width: 46vw; height: 46vw;
+        background: var(--accent);
+        opacity: 0.22;
+      }
+      .fs-blob-b {
+        bottom: -14vw; right: -12vw;
+        width: 42vw; height: 42vw;
+        background: #f472b6; /* pink from the flamegraph palette */
+        opacity: 0.14;
+      }
+      .fs-blob-c {
+        top: 32%; left: 48%;
+        width: 34vw; height: 34vw;
+        background: #c4b5fd; /* violet */
+        opacity: 0.10;
       }
       .fs-stage {
         position: relative;
-        max-width: 760px;
         z-index: 1;
+        width: 100%;
       }
       .fs-eyebrow {
         font-family: var(--font-display);
@@ -236,26 +266,50 @@ function FsStyle() {
         letter-spacing: 0.24em;
         text-transform: uppercase;
         color: var(--fg-faint);
-        margin-bottom: var(--s5);
+        margin-bottom: var(--s4);
       }
+      /* Oversized display type that marquees left so "memviz/neo neo"
+         trails across the viewport — graphic-design poster vibe, and
+         both words get their moment on screen. */
       .fs-title {
-        font-size: clamp(72px, 11vw, 148px);
+        font-size: clamp(140px, 24vw, 380px);
         font-weight: 700;
-        line-height: 0.88;
-        letter-spacing: -0.05em;
+        line-height: 0.82;
+        letter-spacing: -0.06em;
         color: var(--fg);
         margin: 0 0 var(--s5);
+        overflow: hidden;
+        mask-image: linear-gradient(to right, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
+        -webkit-mask-image: linear-gradient(to right, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
+      }
+      .fs-title-track {
+        display: inline-flex;
+        gap: 0.35em;
+        animation: fs-marquee 28s linear infinite;
+        will-change: transform;
+      }
+      .fs-title:hover .fs-title-track { animation-play-state: paused; }
+      .fs-title-text {
+        white-space: nowrap;
+        padding-right: 0.25em;
       }
       .fs-title-neo {
         color: var(--accent);
         font-weight: 400;
       }
+      @keyframes fs-marquee {
+        from { transform: translateX(0); }
+        to   { transform: translateX(calc(-100% / 3)); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .fs-title-track { animation: none; }
+      }
       .fs-lede {
         font-family: var(--font-sans);
-        font-size: 17px;
-        line-height: 1.55;
+        font-size: clamp(18px, 1.4vw, 22px);
+        line-height: 1.5;
         color: var(--fg-muted);
-        max-width: 560px;
+        max-width: 620px;
         margin: 0 0 var(--s7);
       }
       .fs-config {
@@ -286,8 +340,10 @@ function FsStyle() {
         font-size: 12px;
         font-weight: 500;
         color: var(--fg-muted);
-        background: transparent;
-        border: 1px solid var(--border-strong);
+        background: rgba(17,17,19,0.4);
+        border: 1px solid rgba(42,42,47,0.6);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
         cursor: pointer;
         transition: all 120ms var(--ease);
       }
@@ -348,12 +404,13 @@ function FsStyle() {
       }
 
       .fs-phase {
-        font-size: clamp(42px, 6vw, 84px);
-        font-weight: 600;
-        line-height: 0.95;
-        letter-spacing: -0.02em;
+        font-size: clamp(96px, 14vw, 220px);
+        font-weight: 700;
+        line-height: 0.86;
+        letter-spacing: -0.04em;
         color: var(--fg);
         margin: 0 0 var(--s7);
+        white-space: nowrap;
       }
 
       .fs-worker-grid {
@@ -368,8 +425,10 @@ function FsStyle() {
         flex-direction: column;
         gap: 6px;
         padding: 14px 16px;
-        border: 1px solid var(--border);
-        background: var(--bg-elev);
+        border: 1px solid rgba(42,42,47,0.6);
+        background: rgba(17,17,19,0.4);
+        backdrop-filter: blur(14px) saturate(1.1);
+        -webkit-backdrop-filter: blur(14px) saturate(1.1);
         position: relative;
         transition: border-color 200ms var(--ease), background 200ms var(--ease);
       }

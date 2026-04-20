@@ -254,6 +254,47 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
         ctx.fillText(row.segmentType.slice(0, 18), 8, yMid + 4);
       }
 
+      // μs → pixel helper (uses the same scaling drawStrips applies).
+      // Accepts raw alloc_us/free_us; handles time vs event mode.
+      const [vMin, vMax] = lastViewRef.current;
+      const span = vMax - vMin || 1;
+      const viewOrigin = mode === "event" ? 0 : data.time_min;
+      const vMinN = vMin - viewOrigin;
+      const usToPx = (us: number): number => {
+        let x = us - data.time_min;
+        if (mode === "event" && eventTimes) {
+          let lo = 0, hi = eventTimes.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (eventTimes[mid] < x) lo = mid + 1;
+            else hi = mid;
+          }
+          x = lo;
+        }
+        return plotLeft + ((x - vMinN) / span) * plotW;
+      };
+
+      // Hover range — faint green column spanning all rows, with dashed
+      // verticals at alloc_us / free_us. Matches PhaseTimeline's styling
+      // so the same alloc reads identically across the two plots.
+      const h = hoverRef.current;
+      if (h) {
+        const freeUs = h.alloc.free_us < 0 ? data.time_max : h.alloc.free_us;
+        const rx1 = Math.max(usToPx(h.alloc.alloc_us), plotLeft);
+        const rx2 = Math.min(usToPx(freeUs), plotLeft + plotW);
+        if (rx2 > rx1) {
+          const yTop = TOP_PAD;
+          const yBot = height - BOTTOM_PAD;
+          ctx.fillStyle = "rgba(217,249,157,0.05)";
+          ctx.fillRect(rx1, yTop, rx2 - rx1, yBot - yTop);
+          ctx.strokeStyle = "rgba(217,249,157,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          if (rx1 > plotLeft) { ctx.moveTo(rx1, yTop); ctx.lineTo(rx1, yBot); }
+          if (rx2 < plotLeft + plotW) { ctx.moveTo(rx2, yTop); ctx.lineTo(rx2, yBot); }
+          ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
+
       // Selection outline — stroke the rect of the matching alloc.
       if (highlight) {
         const { rowIdx, alloc, row } = highlight;
@@ -262,34 +303,9 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
         const inv = 1 / row.totalSize;
         const rectYTop = yTop + (alloc.offsetInSeg * inv) * rowHPx;
         const rectH = Math.max(MIN_ALLOC_PX, (alloc.size * inv) * rowHPx);
-        // Map alloc's X to pixels using the same scaling drawStrips uses.
-        const [vMin, vMax] = lastViewRef.current;
-        const tOrigin = data.time_min;
         const freeUs = alloc.free_us < 0 ? data.time_max : alloc.free_us;
-        let x0 = alloc.alloc_us - tOrigin;
-        let x1 = freeUs - tOrigin;
-        if (mode === "event" && eventTimes) {
-          const idx = (t: number) => {
-            let lo = 0, hi = eventTimes.length - 1;
-            while (lo < hi) {
-              const mid = (lo + hi) >> 1;
-              if (eventTimes[mid] < t) lo = mid + 1;
-              else hi = mid;
-            }
-            return lo;
-          };
-          x0 = idx(x0); x1 = idx(x1);
-        }
-        const span = vMax - vMin || 1;
-        // In time mode viewRangeRef holds absolute μs, but x0/x1 are
-        // μs-from-time_min (matching stripPack). Normalize vMin the same
-        // way so the outline lands on the painted rect.
-        const viewOrigin = mode === "event" ? 0 : data.time_min;
-        const vMinN = vMin - viewOrigin;
-        const px0 = plotLeft + ((x0 - vMinN) / span) * plotW;
-        const px1 = plotLeft + ((x1 - vMinN) / span) * plotW;
-        const cx1 = Math.max(plotLeft, Math.min(plotLeft + plotW, px0));
-        const cx2 = Math.max(plotLeft, Math.min(plotLeft + plotW, px1));
+        const cx1 = Math.max(plotLeft, Math.min(plotLeft + plotW, usToPx(alloc.alloc_us)));
+        const cx2 = Math.max(plotLeft, Math.min(plotLeft + plotW, usToPx(freeUs)));
         if (cx2 > cx1) {
           ctx.strokeStyle = COLOR_ACCENT;
           ctx.lineWidth = 1.5;
@@ -316,10 +332,14 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
   // stay on PhaseTimeline since it owns keyboard focus.
   const setSelectedAlloc = useDataStore((s) => s.setSelectedAlloc);
   const framePool = useDataStore((s) => s.framePool);
-  const [hover, setHover] = useState<
+  // Hover lives in both a ref (the draw loop reads it every frame) and
+  // React state (the tooltip needs to re-render). The ref is the
+  // authoritative value; state mirrors it for the JSX side.
+  const hoverRef = useRef<
     | { alloc: SegmentAlloc; row: SegmentRow; mx: number; my: number }
     | null
   >(null);
+  const [hover, setHover] = useState<typeof hoverRef.current>(null);
 
   // Shared hit-test for click + hover. Returns the smallest rect the
   // cursor falls within (with a few pixels of tolerance) plus its row.
@@ -393,13 +413,13 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
       hoverPending.current = null;
       if (!p) return;
       const hit = hitTestAt(p.mx, p.my);
-      if (!hit) {
-        setHover(null);
-      } else {
-        setHover((prev) =>
-          prev && prev.alloc === hit.alloc ? { ...prev, mx: p.mx, my: p.my }
-                                            : { alloc: hit.alloc, row: hit.row, mx: p.mx, my: p.my });
-      }
+      const next = hit ? { alloc: hit.alloc, row: hit.row, mx: p.mx, my: p.my } : null;
+      const prev = hoverRef.current;
+      hoverRef.current = next;
+      dirtyRef.current = true;                // draw loop picks up the overlay
+      // Only fire a React update when the hovered alloc changes — avoids
+      // re-renders for every pixel of mouse movement over the same rect.
+      if (prev?.alloc !== next?.alloc) setHover(next);
     });
   };
   const handleMouseLeave = () => {
@@ -408,7 +428,11 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
       hoverRaf.current = null;
     }
     hoverPending.current = null;
-    setHover(null);
+    if (hoverRef.current !== null) {
+      hoverRef.current = null;
+      dirtyRef.current = true;
+      setHover(null);
+    }
   };
 
   return (

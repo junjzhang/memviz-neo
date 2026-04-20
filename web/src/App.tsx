@@ -5,7 +5,6 @@ import FileSelector from "./components/FileSelector";
 import PhaseTimeline from "./views/PhaseTimeline";
 import MemoryFlamegraph from "./views/MemoryFlamegraph";
 import TopAllocations from "./views/TopAllocations";
-import AddressMap from "./views/AddressMap";
 import MultiRank from "./views/MultiRank";
 import AnomalyPanel from "./views/AnomalyPanel";
 import SegmentTimeline from "./views/SegmentTimeline";
@@ -159,7 +158,6 @@ function Dashboard() {
   const topAllocations = useDataStore((s) => s.topAllocations);
   const xAxisMode = useDataStore((s) => s.xAxisMode);
   const eventTimes = useDataStore((s) => s.eventTimes);
-  const segments = useDataStore((s) => s.segments);
   const timeline = useDataStore((s) => s.timeline);
   const timelineAllocs = useDataStore((s) => s.timelineAllocs);
   const anomalies = useDataStore((s) => s.anomalies);
@@ -174,8 +172,7 @@ function Dashboard() {
   );
 
   const [tlRef, tlWidth] = useContainerWidth();
-  const [gridRef, gridWidth] = useContainerWidth();
-  const halfWidth = gridWidth > 0 ? Math.floor((gridWidth - 32) / 2) : 600;
+  const [flameRef, flameWidth] = useContainerWidth();
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
   const tlHeight = useViewportHeight(480, 500);
 
@@ -284,73 +281,29 @@ function Dashboard() {
           </Section>
         )}
 
-        <div
-          ref={gridRef}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 32,
-            marginBottom: 56,
-          }}
-        >
-          <section>
-            <div className="section-head">
-              <h2 className="section-title">
-                <span
-                  className="mono"
-                  style={{
-                    color: "var(--fg-dim)",
-                    letterSpacing: "0.14em",
-                    marginRight: 12,
-                  }}
-                >
-                  04
-                </span>
-                Memory Flame Graph
-              </h2>
+        <div ref={flameRef} style={{ marginBottom: 56 }}>
+          <Section
+            eyebrow="04"
+            title="Memory Flame Graph"
+            meta={
               <span
                 className="section-meta mono faint"
                 title="bytes × lifetime contributed by allocations passing through each frame"
               >
                 pressure by call stack
               </span>
-            </div>
-            {flame && flame.totalWeight > 0 && halfWidth > 0 ? (
-              <MemoryFlamegraph flame={flame} framePool={framePool} width={halfWidth} height={450} />
+            }
+          >
+            {flame && flame.totalWeight > 0 && flameWidth > 0 ? (
+              <MemoryFlamegraph flame={flame} framePool={framePool} width={flameWidth} height={450} />
             ) : (
               <Empty />
             )}
-          </section>
-
-          <section>
-            <div className="section-head">
-              <h2 className="section-title">
-                <span
-                  className="mono"
-                  style={{
-                    color: "var(--fg-dim)",
-                    letterSpacing: "0.14em",
-                    marginRight: 12,
-                  }}
-                >
-                  05
-                </span>
-                Address Space
-              </h2>
-              <span className="section-meta mono hl">{rankTag}</span>
-            </div>
-            <div style={{ maxHeight: 460, overflow: "auto" }}>
-              {segments.length > 0 && halfWidth > 0 ? (
-                <AddressMap segments={segments} width={halfWidth} />
-              ) : (
-                <Empty />
-              )}
-            </div>
-          </section>
+          </Section>
         </div>
 
         <Section
-          eyebrow="06"
+          eyebrow="05"
           title="Top Allocations"
           meta={<span className="mono hl">{rankTag}</span>}
         >

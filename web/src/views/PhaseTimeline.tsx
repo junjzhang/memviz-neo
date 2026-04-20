@@ -277,6 +277,25 @@ export default function PhaseTimeline({
     },
     [plotW],
   );
+  // Absolute μs → whatever the view's X-axis is. In time mode that's
+  // absolute μs (viewRange is absolute). In event mode, map to the
+  // event-index space stripBuffer uses. Anomaly flags + hover-range
+  // overlays need this because they carry raw alloc_us values, not
+  // stripBuffer-normalized ones.
+  const usToView = useCallback(
+    (us: number) => {
+      if (xAxisMode !== "event" || !eventTimesArr || eventTimesArr.length === 0) return us;
+      const target = us - data.time_min;
+      let lo = 0, hi = eventTimesArr.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (eventTimesArr[mid] < target) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    },
+    [xAxisMode, eventTimesArr, data.time_min],
+  );
   const xToTime = useCallback(
     (x: number) => {
       const [vMin, vMax] = viewRangeRef.current;
@@ -547,8 +566,9 @@ export default function PhaseTimeline({
       const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
       for (let ai = 0; ai < flagLimit; ai++) {
         const anomaly = anomalies[ai];
-        if (anomaly.alloc_us > tMax || anomaly.alloc_us < tMin) continue;
-        const x = timeToX(anomaly.alloc_us);
+        const vAlloc = usToView(anomaly.alloc_us);
+        if (vAlloc > tMax || vAlloc < tMin) continue;
+        const x = timeToX(vAlloc);
         if (x < MARGIN.left || x > MARGIN.left + plotW) continue;
         const color = ANOMALY_COLORS[anomaly.type] || "#f87171";
         ctx.fillStyle = color;
@@ -621,8 +641,8 @@ export default function PhaseTimeline({
     if ((hoverAlloc || hoverAnomaly) && !selRect) {
       const hb = hoverAlloc || allocs.find((b) => b.addr === hoverAnomaly?.anomaly.addr);
       if (hb) {
-        const rx1 = Math.max(timeToX(hb.alloc_us), MARGIN.left);
-        const rx2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
+        const rx1 = Math.max(timeToX(usToView(hb.alloc_us)), MARGIN.left);
+        const rx2 = Math.min(timeToX(usToView(hb.free_us)), MARGIN.left + plotW);
         ctx.fillStyle = "rgba(217,249,157,0.05)";
         ctx.fillRect(rx1, MARGIN.top, rx2 - rx1, plotH);
         ctx.strokeStyle = "rgba(217,249,157,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
@@ -631,8 +651,8 @@ export default function PhaseTimeline({
         if (rx2 <= MARGIN.left + plotW) { ctx.moveTo(rx2, MARGIN.top); ctx.lineTo(rx2, MARGIN.top + plotH); }
         ctx.stroke(); ctx.setLineDash([]);
         if (hb.free_requested_us > 0 && hb.free_requested_us < hb.free_us) {
-          const px1 = Math.max(timeToX(hb.free_requested_us), MARGIN.left);
-          const px2 = Math.min(timeToX(hb.free_us), MARGIN.left + plotW);
+          const px1 = Math.max(timeToX(usToView(hb.free_requested_us)), MARGIN.left);
+          const px2 = Math.min(timeToX(usToView(hb.free_us)), MARGIN.left + plotW);
           ctx.fillStyle = "rgba(248,113,113,0.12)"; ctx.fillRect(px1, MARGIN.top, px2 - px1, plotH);
           ctx.strokeStyle = "rgba(248,113,113,0.55)"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
           ctx.beginPath();
@@ -852,7 +872,7 @@ export default function PhaseTimeline({
       const flagLimit = Math.min(anomalies.length, TIMELINE_FLAG_LIMIT);
       for (let ai = 0; ai < flagLimit; ai++) {
         const anomaly = anomalies[ai];
-        const fx = timeToX(anomaly.alloc_us);
+        const fx = timeToX(usToView(anomaly.alloc_us));
         if (Math.abs(mx - fx) < FLAG_SIZE) {
           nextAnomaly = { anomaly, x: mx, y: my };
           break;
@@ -870,7 +890,7 @@ export default function PhaseTimeline({
     hoverAllocRef.current = nextBlock;
     updateHoverCard();
     invalidate();
-  }, [anomalies, timeToX, hitTest, updateHoverCard]);
+  }, [anomalies, timeToX, usToView, hitTest, updateHoverCard]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
