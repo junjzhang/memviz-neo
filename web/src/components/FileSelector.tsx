@@ -1,5 +1,25 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useFileStore, WORKER_COUNT_MAX, LAYOUT_LIMIT_OPTIONS } from "../stores/fileStore";
+
+/**
+ * Track pointer position (normalised to −1..1) on CSS custom properties
+ * so the decorative blobs can follow the cursor with pure CSS. Scoped to
+ * the FileSelector mount — as soon as the app loads data, the listener
+ * goes away.
+ */
+function usePointerParallax() {
+  useEffect(() => {
+    const onMove = (e: MouseEvent | PointerEvent) => {
+      const x = (e.clientX / window.innerWidth - 0.5) * 2;
+      const y = (e.clientY / window.innerHeight - 0.5) * 2;
+      const s = document.documentElement.style;
+      s.setProperty("--fs-mx", x.toFixed(3));
+      s.setProperty("--fs-my", y.toFixed(3));
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, []);
+}
 
 const hasDirectoryPicker = typeof window !== "undefined" && "showDirectoryPicker" in window;
 
@@ -19,6 +39,7 @@ export default function FileSelector() {
     layoutLimit, setLayoutLimit,
   } = useFileStore();
   const inputRef = useRef<HTMLInputElement>(null);
+  usePointerParallax();
 
   // Pill values: 1, 2, 4, 8, detected max — deduped and capped.
   const workerOptions = useMemo(() => {
@@ -228,32 +249,55 @@ function FsStyle() {
         padding: 0 clamp(24px, 5vw, 72px);
         overflow: hidden;
       }
-      /* Soft accent blobs float behind everything; heavy blur so they
-         read as atmosphere, not shapes. */
+      /* Soft accent blobs float behind everything; heavy blur + screen
+         blend so they read as light bleeding through glass, not as
+         opaque discs. */
       .fs-blob {
         position: absolute;
         border-radius: 50%;
-        filter: blur(120px);
+        filter: blur(160px) saturate(1.2);
+        mix-blend-mode: screen;
         pointer-events: none;
         z-index: 0;
       }
+      /* Each blob parallaxes against the cursor by a different factor
+         so the scene gains fake depth — the closer blob (larger drift)
+         reads as nearer. Transition smooths out 60Hz pointer jitter. */
       .fs-blob-a {
-        top: -8vw; left: -10vw;
-        width: 46vw; height: 46vw;
+        top: -10vw; left: -12vw;
+        width: 52vw; height: 52vw;
         background: var(--accent);
-        opacity: 0.22;
+        opacity: 0.38;
+        transform: translate3d(
+          calc(var(--fs-mx, 0) * 140px),
+          calc(var(--fs-my, 0) * 100px),
+          0);
+        transition: transform 320ms cubic-bezier(.2,.7,.2,1);
       }
       .fs-blob-b {
-        bottom: -14vw; right: -12vw;
-        width: 42vw; height: 42vw;
+        bottom: -16vw; right: -14vw;
+        width: 48vw; height: 48vw;
         background: #f472b6; /* pink from the flamegraph palette */
-        opacity: 0.14;
+        opacity: 0.30;
+        transform: translate3d(
+          calc(var(--fs-mx, 0) * -180px),
+          calc(var(--fs-my, 0) * -140px),
+          0);
+        transition: transform 380ms cubic-bezier(.2,.7,.2,1);
       }
       .fs-blob-c {
-        top: 32%; left: 48%;
-        width: 34vw; height: 34vw;
+        top: 28%; left: 46%;
+        width: 40vw; height: 40vw;
         background: #c4b5fd; /* violet */
-        opacity: 0.10;
+        opacity: 0.22;
+        transform: translate3d(
+          calc(var(--fs-mx, 0) * 260px),
+          calc(var(--fs-my, 0) * 200px),
+          0);
+        transition: transform 240ms cubic-bezier(.2,.7,.2,1);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .fs-blob { transition: none; transform: none !important; }
       }
       .fs-stage {
         position: relative;
@@ -265,7 +309,8 @@ function FsStyle() {
         font-size: 11px;
         letter-spacing: 0.24em;
         text-transform: uppercase;
-        color: var(--fg-faint);
+        color: var(--fg-dim);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
         margin-bottom: var(--s4);
       }
       /* Oversized display type that marquees left so "memviz/neo neo"
@@ -288,7 +333,6 @@ function FsStyle() {
         animation: fs-marquee 28s linear infinite;
         will-change: transform;
       }
-      .fs-title:hover .fs-title-track { animation-play-state: paused; }
       .fs-title-text {
         white-space: nowrap;
         padding-right: 0.25em;
@@ -308,7 +352,8 @@ function FsStyle() {
         font-family: var(--font-sans);
         font-size: clamp(18px, 1.4vw, 22px);
         line-height: 1.5;
-        color: var(--fg-muted);
+        color: var(--fg);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
         max-width: 620px;
         margin: 0 0 var(--s7);
       }
@@ -324,11 +369,14 @@ function FsStyle() {
         font-size: 10px;
         letter-spacing: 0.18em;
         text-transform: uppercase;
-        color: var(--fg-faint);
+        color: var(--fg-dim);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
       }
       .fs-config-hint {
         font-size: 10px;
         letter-spacing: 0.06em;
+        color: var(--fg-dim);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
       }
       .fs-pills {
         display: inline-flex;
@@ -386,7 +434,11 @@ function FsStyle() {
         text-transform: uppercase;
         color: var(--fg-faint);
       }
-      .fs-fp-v { font-size: 12px; color: var(--fg); }
+      .fs-fp-v {
+        font-size: 12px;
+        color: var(--fg);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+      }
 
       /* Loading view */
       .fs-eyebrow-dot {
