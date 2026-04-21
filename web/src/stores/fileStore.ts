@@ -20,23 +20,39 @@ export function getActivePool(): WorkerPool | null {
   return activePool;
 }
 
-const WORKER_COUNT_KEY = "memviz.workerCount";
 const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
 export const WORKER_COUNT_MAX = Math.max(4, Math.min(HW_CONC, 16));
 
-function loadSavedWorkerCount(): number {
-  if (typeof localStorage === "undefined") return Math.min(HW_CONC, 8);
-  const raw = localStorage.getItem(WORKER_COUNT_KEY);
-  const n = raw != null ? Number(raw) : NaN;
-  if (Number.isFinite(n) && n >= 1 && n <= WORKER_COUNT_MAX) return n;
-  return Math.min(HW_CONC, 8);
+/**
+ * Load a numeric preference from localStorage. Reads the key, rejects
+ * anything that fails `validate`, and falls back to `fallback`.
+ * `save` writes clamped values back; both handle missing localStorage
+ * (SSR / privacy mode) and quota errors gracefully.
+ */
+function persistentNumber(key: string, fallback: number, validate: (n: number) => boolean) {
+  const load = (): number => {
+    if (typeof localStorage === "undefined") return fallback;
+    const raw = localStorage.getItem(key);
+    const n = raw != null ? Number(raw) : NaN;
+    return Number.isFinite(n) && validate(n) ? n : fallback;
+  };
+  const save = (n: number) => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem(key, String(n)); } catch { /* ignore quota */ }
+  };
+  return { load, save };
 }
+
+const workerCountPref = persistentNumber(
+  "memviz.workerCount",
+  Math.min(HW_CONC, 8),
+  (n) => n >= 1 && n <= WORKER_COUNT_MAX,
+);
 
 // layout_limit passed to WASM parse_intern. 0 = keep all allocations.
 // Small values (3k) drop mid-sized transient allocations and flatten
 // the optimizer-step saw-tooth pattern; 20k usually covers full FSDP
 // iterations; 0 is exact at the cost of more strips.
-const LAYOUT_LIMIT_KEY = "memviz.layoutLimit";
 export const LAYOUT_LIMIT_OPTIONS: { value: number; label: string }[] = [
   { value: 3000, label: "3k" },
   { value: 10000, label: "10k" },
@@ -44,13 +60,11 @@ export const LAYOUT_LIMIT_OPTIONS: { value: number; label: string }[] = [
   { value: 0, label: "all" },
 ];
 
-function loadSavedLayoutLimit(): number {
-  if (typeof localStorage === "undefined") return 20000;
-  const raw = localStorage.getItem(LAYOUT_LIMIT_KEY);
-  const n = raw != null ? Number(raw) : NaN;
-  if (Number.isFinite(n) && n >= 0) return n;
-  return 20000;
-}
+const layoutLimitPref = persistentNumber(
+  "memviz.layoutLimit",
+  20000,
+  (n) => n >= 0,
+);
 
 interface FileState {
   status: "idle" | "loading" | "ready" | "error";
@@ -89,8 +103,8 @@ export const useFileStore = create<FileState>((set) => ({
   totalCount: 0,
   inFlightRanks: [],
   poolSize: 0,
-  workerCount: loadSavedWorkerCount(),
-  layoutLimit: loadSavedLayoutLimit(),
+  workerCount: workerCountPref.load(),
+  layoutLimit: layoutLimitPref.load(),
   error: null,
   ranks: [],
 
@@ -120,17 +134,13 @@ export const useFileStore = create<FileState>((set) => ({
 
   setWorkerCount: (n: number) => {
     const clamped = Math.max(1, Math.min(n, WORKER_COUNT_MAX));
-    if (typeof localStorage !== "undefined") {
-      try { localStorage.setItem(WORKER_COUNT_KEY, String(clamped)); } catch { /* ignore */ }
-    }
+    workerCountPref.save(clamped);
     set({ workerCount: clamped });
   },
 
   setLayoutLimit: (n: number) => {
     const v = Math.max(0, Math.floor(n));
-    if (typeof localStorage !== "undefined") {
-      try { localStorage.setItem(LAYOUT_LIMIT_KEY, String(v)); } catch { /* ignore */ }
-    }
+    layoutLimitPref.save(v);
     set({ layoutLimit: v });
   },
 

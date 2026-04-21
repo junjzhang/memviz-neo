@@ -68,23 +68,26 @@ interface DataState {
   resetData: () => void;
 }
 
-function applyRankData(data: RankData, rank: number): Partial<DataState> {
+/** Rank data → slice of DataState. Pass null to get the empty state
+ *  (used by resetData). Transient fields (focus, selection, switching)
+ *  always reset when this runs. */
+function applyRankData(data: RankData | null, rank: number): Partial<DataState> {
   return {
     currentRank: rank,
-    summary: data.summary,
-    segments: data.segments,
-    topAllocations: data.topAllocations,
-    timeline: data.timeline,
-    timelineAllocs: data.timelineAllocs,
-    anomalies: data.anomalies,
-    framePool: data.framePool,
-    timelineStripBuffer: data.stripBuffer,
-    timelineStripBufferEvent: data.stripBufferEvent,
-    eventTimes: data.eventTimes,
-    timelineStripCount: data.stripCount,
-    timelineMaxBytesFull: data.maxBytesFull,
-    segmentRows: data.segmentRows,
-    flame: data.flame,
+    summary: data?.summary ?? null,
+    segments: data?.segments ?? [],
+    topAllocations: data?.topAllocations ?? [],
+    timeline: data?.timeline ?? null,
+    timelineAllocs: data?.timelineAllocs ?? [],
+    anomalies: data?.anomalies ?? [],
+    framePool: data?.framePool ?? [],
+    timelineStripBuffer: data?.stripBuffer ?? null,
+    timelineStripBufferEvent: data?.stripBufferEvent ?? null,
+    eventTimes: data?.eventTimes ?? null,
+    timelineStripCount: data?.stripCount ?? 0,
+    timelineMaxBytesFull: data?.maxBytesFull ?? 0,
+    segmentRows: data?.segmentRows ?? [],
+    flame: data?.flame ?? null,
     focusedAddr: null,
     focusRange: null,
     selectedAlloc: null,
@@ -92,29 +95,6 @@ function applyRankData(data: RankData, rank: number): Partial<DataState> {
     _currentData: data,
   };
 }
-
-const emptyState: Partial<DataState> = {
-  currentRank: 0,
-  summary: null,
-  segments: [],
-  topAllocations: [],
-  timeline: null,
-  timelineAllocs: [],
-  anomalies: [],
-  framePool: [],
-  timelineStripBuffer: null,
-  timelineStripBufferEvent: null,
-  eventTimes: null,
-  timelineStripCount: 0,
-  timelineMaxBytesFull: 0,
-  segmentRows: [],
-  flame: null,
-  switching: false,
-  focusedAddr: null,
-  focusRange: null,
-  selectedAlloc: null,
-  _currentData: null,
-};
 
 // De-dupe concurrent setCurrentRank calls for the same rank.
 let inflight: { rank: number; promise: Promise<void> } | null = null;
@@ -215,6 +195,6 @@ export const useDataStore = create<DataState>((set, get) => ({
 
   resetData: () => {
     inflight = null;
-    set({ ...emptyState, error: null });
+    set({ ...applyRankData(null, 0), error: null });
   },
 }));

@@ -1,6 +1,6 @@
 import { memo, useCallback, useState } from "react";
 import { formatBytes } from "../utils";
-import { useRankSummaries } from "../stores/rankStore";
+import { useRankSummaries, summaryMetrics } from "../stores/rankStore";
 
 interface Props {
   /** Every rank we intend to show a slot for, including ones still loading. */
@@ -67,9 +67,7 @@ const Cell = memo(function Cell({ rank, isSelected, maxPeak, onSelect, onHover }
   // the snapshot's end-of-window state. Baseline (pre-window) is
   // stacked at the bottom so the "what can't be attributed" vs
   // "what new code added" split stays visible.
-  const peak = loaded ? (summary.peak_bytes ?? summary.active_bytes) : 0;
-  const baseline = loaded ? Math.min(summary.baseline ?? 0, peak) : 0;
-  const windowDelta = loaded ? Math.max(0, peak - baseline) : 0;
+  const { baseline, windowDelta } = summaryMetrics(summary);
   const baselineH = loaded ? (baseline / maxPeak) * CELL_MAX_H : 0;
   const peakH = loaded ? (windowDelta / maxPeak) * CELL_MAX_H : 0;
 

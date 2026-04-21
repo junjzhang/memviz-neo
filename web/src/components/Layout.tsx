@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { useFileStore } from "../stores/fileStore";
-import { useRankSummaries } from "../stores/rankStore";
+import { useRankSummaries, summaryMetrics } from "../stores/rankStore";
 import { formatBytes } from "../utils";
 
 export default function Layout({ children }: { children: ReactNode }) {
@@ -19,9 +19,7 @@ export default function Layout({ children }: { children: ReactNode }) {
     resetData();
   };
 
-  const peak = liveSummary?.peak_bytes ?? liveSummary?.active_bytes ?? 0;
-  const reserved = liveSummary?.total_reserved ?? 0;
-  const baseline = liveSummary ? Math.min(liveSummary.baseline ?? 0, peak) : 0;
+  const { peak, reserved, baseline } = summaryMetrics(liveSummary);
   const util = reserved > 0 ? ((peak / reserved) * 100).toFixed(0) : "—";
 
   return (

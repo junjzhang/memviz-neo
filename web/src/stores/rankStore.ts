@@ -19,33 +19,48 @@ interface RankSummariesState {
    *  rank-selector cells against, since peak is the OOM-relevant
    *  worst moment rather than the snapshot's end-of-window state. */
   maxPeak: number;
-  setSummary: (rank: number, s: RankSummary) => void;
-  clearAll: () => void;
 }
 
-export const useRankSummaries = create<RankSummariesState>((set) => ({
+export const useRankSummaries = create<RankSummariesState>(() => ({
   summaries: {},
   maxReserved: 1,
   maxPeak: 1,
-  setSummary: (rank, s) => set((state) => {
+}));
+
+export function setSummary(rank: number, s: RankSummary) {
+  useRankSummaries.setState((state) => {
     const peak = s.peak_bytes ?? s.active_bytes;
     return {
       summaries: { ...state.summaries, [rank]: s },
       maxReserved: s.total_reserved > state.maxReserved ? s.total_reserved : state.maxReserved,
       maxPeak: peak > state.maxPeak ? peak : state.maxPeak,
     };
-  }),
-  clearAll: () => set({ summaries: {}, maxReserved: 1, maxPeak: 1 }),
-}));
-
-export function setSummary(rank: number, s: RankSummary) {
-  useRankSummaries.getState().setSummary(rank, s);
+  });
 }
 
 export function clearSummaries() {
-  useRankSummaries.getState().clearAll();
+  useRankSummaries.setState({ summaries: {}, maxReserved: 1, maxPeak: 1 });
 }
 
 export function getSummary(rank: number): RankSummary | undefined {
   return useRankSummaries.getState().summaries[rank];
+}
+
+/**
+ * Derived metrics from a (possibly loading) summary. Peak = worst
+ * moment in the window (OOM-relevant) with active_bytes as fallback;
+ * baseline = pre-window memory clamped to peak; windowDelta = peak
+ * above the baseline (the bit the window actually shows). Zero
+ * values when the summary hasn't landed yet.
+ */
+export function summaryMetrics(summary: RankSummary | undefined) {
+  if (!summary) return { peak: 0, baseline: 0, windowDelta: 0, reserved: 0 };
+  const peak = summary.peak_bytes ?? summary.active_bytes;
+  const baseline = Math.min(summary.baseline ?? 0, peak);
+  return {
+    peak,
+    baseline,
+    windowDelta: Math.max(0, peak - baseline),
+    reserved: summary.total_reserved,
+  };
 }

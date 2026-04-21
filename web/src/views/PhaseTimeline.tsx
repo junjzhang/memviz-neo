@@ -1195,14 +1195,14 @@ export default function PhaseTimeline({
           font-size: 11px;
           line-height: 1.7;
         }
-        .tl-frame {
+        .tl-stack-frame {
           color: var(--fg-dim);
           padding: 1px 0;
         }
-        .tl-frame[data-py="1"] { color: var(--fg-muted); }
-        .tl-frame[data-py="1"] .tl-frame-loc { color: var(--accent); opacity: 0.8; }
-        .tl-frame-name { color: inherit; }
-        .tl-frame-loc { color: var(--fg-dim); }
+        .tl-stack-frame[data-py="1"] { color: var(--fg-muted); }
+        .tl-stack-frame[data-py="1"] .tl-stack-loc { color: var(--accent); opacity: 0.8; }
+        .tl-stack-name { color: inherit; }
+        .tl-stack-loc { color: var(--fg-dim); }
       `}</style>
     </div>
   );

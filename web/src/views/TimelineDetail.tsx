@@ -141,12 +141,12 @@ export function TimelineDetailPanel() {
           .map((f, i) => {
             const isPython = f.filename.includes(".py");
             return (
-              <div key={i} className="tl-frame" data-py={isPython ? "1" : "0"}>
-                <span className="tl-frame-name">
+              <div key={i} className="tl-stack-frame" data-py={isPython ? "1" : "0"}>
+                <span className="tl-stack-name">
                   {f.name.length > 100 ? f.name.slice(0, 97) + "…" : f.name}
                 </span>
                 {f.filename && (
-                  <span className="tl-frame-loc">
+                  <span className="tl-stack-loc">
                     {" @ "}{f.filename.split("/").slice(-2).join("/")}:{f.line}
                   </span>
                 )}
