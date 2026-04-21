@@ -52,26 +52,13 @@ rebuild around three ideas:
 ### Parse-phase benchmark
 
 Same 12.1 MiB pickle (50 k trace events, 90 segments) on one machine.
-Two measurements — one apples-to-apples, one showing what each tool
-actually does up front.
+Each tool parses different amounts of work up front — the table shows
+what each one actually does before the UI becomes interactive.
 
-**Pickle decode only** (bytes → in-memory object graph):
-
-|                                            | time    |
-| ------------------------------------------ | ------- |
-| `pytorch` `unpickle` (hand-rolled JS)      | ~164 ms |
-| `memviz/neo` `parse_pickle_only` (Rust/WASM) | **~92 ms** |
-
-The `Rc`-shared `Value` tree handles `MEMOIZE`/`BINGET` with one refcount
-bump instead of a JS object walk — ~1.8× faster than pytorch's JS
-unpickler.
-
-**Full parse pipeline** (what each tool actually runs up front):
-
-|                                          | time    | work done |
-| ---------------------------------------- | ------- | --------- |
-| `pytorch` `unpickle` + `annotate_snapshot` | ~163 ms | decode + alloc/free version stamping |
-| `desktop_memory_viz` Python `extract_snapshot.py` | ~1.6 s | decode + JSON dump for native viewer |
+|                                          | time     | work done |
+| ---------------------------------------- | -------- | --------- |
+| `pytorch` `unpickle` + `annotate_snapshot` | ~163 ms  | decode + alloc/free version stamping |
+| `desktop_memory_viz` Python `extract_snapshot.py` | ~1588 ms | decode + JSON dump for native viewer |
 | `memviz/neo` `parse_intern` (all)        | ~1040 ms | decode + frame/stack interning + alloc/free pairing + top-N + IR emit |
 
 pytorch defers almost everything to view-open time — d3 walks the JS
@@ -83,11 +70,30 @@ pre-baked IR so it never revisits the pickle.
 
 Net: **pytorch parses faster, memviz/neo switches views faster.** At the
 run level the single-pickle gap closes — pytorch shows one pickle at a
-time (8 × 180 ms sequential ≈ 1.44 s), memviz/neo races an 8-rank
-snapshot through 8 workers and finishes in ~1 s wall-clock.
+time (8 × 180 ms sequential ≈ 1440 ms), memviz/neo races an 8-rank
+snapshot through 8 workers and finishes in ~1000 ms wall-clock.
 
-Reproduce with `node bench/memviz.mjs` and `node bench/pytorch.mjs` —
-see [`bench/README.md`](./bench/README.md).
+### Render benchmark
+
+Same pickle, end-to-end via `bench/render.mjs --headed` (Framework laptop,
+Intel iGPU, 120 Hz display, ~18 k allocs in the default view):
+
+|                 | value |
+| --------------- | ----- |
+| `T_parse`       | ~1200 ms (pickle → summary in store) |
+| `T_render`      | ~2100 ms (layout worker O(N²) + React mount + WebGL2 init) |
+| JS heap used    | ~420 MiB |
+| Total UA memory | ~555 MiB |
+| Idle FPS        | 120 fps · frame p95 = 8.3 ms |
+| Pan 'd' 5 s     | 120 fps · frame p95 = 8.3 ms |
+| Zoom 'w' 3 s    | 120 fps · frame p95 = 8.3 ms |
+
+Frame budget on a 120 Hz display is 8.3 ms — all three gestures hit it
+with no p95 spike even with ~18 k allocations in view.
+
+Reproduce with `node bench/memviz.mjs`, `node bench/pytorch.mjs`,
+`node bench/desktop.mjs`, `node bench/render.mjs` — see
+[`bench/README.md`](./bench/README.md).
 
 [pv]: https://docs.pytorch.org/memory_viz
 [cj]: https://github.com/C-J-Cundy/desktop_memory_viz

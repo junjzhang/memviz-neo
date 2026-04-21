@@ -87,24 +87,13 @@ Measured on a 2-socket Intel laptop under Node v25 / Chrome v142,
 Linux 6.x / wayland. Snapshot: 12.1 MiB pickle, 50 k trace events,
 90 segments, 2259 blocks.
 
-### Apples-to-apples: pickle decode only
-
-| Tool                        | Time (avg) |
-| --------------------------- | ---------- |
-| pytorch `unpickle` (JS)     | ~164 ms    |
-| memviz/neo `parse_pickle_only` (Rust/WASM) | **~92 ms** |
-
-Pure pickle decode — pytorch produces a JS object tree, memviz/neo
-produces an `Rc<Value>` tree. Rust/WASM with `Rc`-shared values for
-`MEMOIZE`/`BINGET` is ~1.8× faster than the hand-rolled JS parser.
-
-### Different workloads: full parse pipeline
+### Full parse pipeline
 
 | Tool                                   | Time (avg) | What's included |
 | -------------------------------------- | ---------- | --------------- |
 | pytorch `unpickle` + `annotate_snapshot` | ~163 ms  | decode + alloc/free version stamping |
 | desktop_memory_viz `extract_snapshot.py` | ~1588 ms | Python pickle decode + dedup + JSON dump (6.8 MiB) for the native Rust viewer |
-| memviz/neo `parse_intern` (all)        | ~1040 ms   | decode + frame/stack interning + alloc/free pairing + top-N + IR emit |
+| memviz/neo `parse_intern` (all)        | ~1040 ms | decode + frame/stack interning + alloc/free pairing + top-N + IR emit |
 
 pytorch's `annotate_snapshot` does almost nothing (~15 ms on top of
 unpickle): stamp versions, normalize stream names. It defers everything
@@ -132,7 +121,7 @@ re-traverses the JS object tree.
 The single-pickle number above misses our actual win. pytorch's UI
 shows one pickle at a time (dropdown to switch), no parallel parse. Our
 worker pool races N ranks in parallel — an 8-rank snapshot finishes in
-~1 s wall-clock instead of `8 × 180 ms = 1.44 s` sequential in pytorch.
+~1000 ms wall-clock instead of `8 × 180 ms = 1440 ms` sequential in pytorch.
 
 ### Render capacity
 
