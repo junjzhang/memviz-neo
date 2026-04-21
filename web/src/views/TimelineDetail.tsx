@@ -122,15 +122,8 @@ export function TimelineDetailPanel() {
           </div>
         )}
         <div
-          className="mono"
-          style={{
-            marginLeft: "auto",
-            alignSelf: "flex-end",
-            fontSize: 10,
-            color: "var(--fg-faint)",
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
-          }}
+          className="eyebrow"
+          style={{ marginLeft: "auto", alignSelf: "flex-end" }}
         >
           ⌘C copy trace
         </div>

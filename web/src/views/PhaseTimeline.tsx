@@ -1070,14 +1070,8 @@ export default function PhaseTimeline({
         >
           <div
             ref={hcEyebrowRef}
-            className="display"
-            style={{
-              fontSize: 10,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              marginBottom: 4,
-              color: "var(--fg-faint)",
-            }}
+            className="eyebrow"
+            style={{ letterSpacing: "0.14em", marginBottom: 4 }}
           />
           <div
             ref={hcPrimaryRef}

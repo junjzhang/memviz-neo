@@ -69,6 +69,17 @@ button { font-family: inherit; }
 .mono, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .display { font-family: var(--font-display); letter-spacing: -0.02em; }
 
+/* Small-caps eyebrow label (hover cards, context tags). Override
+   font-size / letter-spacing inline when a specific slot wants to
+   deviate — the defaults fit the common case. */
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
 /* ---------- scrollbar ---------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

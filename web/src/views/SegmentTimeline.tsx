@@ -478,7 +478,7 @@ function SegmentHoverCard({
         display: "block",
       }}
     >
-      <div className="faint" style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+      <div className="eyebrow">
         In segment · 0x{row.segmentAddr.toString(16)}
       </div>
       <div style={{ color: "var(--fg)", fontSize: 14, marginTop: 2 }}>
