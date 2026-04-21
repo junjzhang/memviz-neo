@@ -41,6 +41,20 @@ walks the tree to pair allocs/frees and attach versions.
 node bench/pytorch.mjs
 ```
 
+## desktop.mjs
+
+Times [desktop_memory_viz][cj]'s Python `extract_snapshot.py` on the
+same snapshot. The desktop viewer itself is a native Rust eframe/egui
+app that consumes the JSON this script produces, so the parse cost
+lives here.
+
+Clone [C-J-Cundy/desktop_memory_viz][cj] and set `DMV_DIR` to its path
+(defaults to `/tmp/compare/desktop_memory_viz`).
+
+```bash
+node bench/desktop.mjs
+```
+
 ## Indicative numbers
 
 Measured on a 2-socket Intel laptop under Node v25 / Chrome v142,
@@ -63,6 +77,7 @@ produces an `Rc<Value>` tree. Rust/WASM with `Rc`-shared values for
 | Tool                                   | Time (avg) | What's included |
 | -------------------------------------- | ---------- | --------------- |
 | pytorch `unpickle` + `annotate_snapshot` | ~163 ms  | decode + alloc/free version stamping |
+| desktop_memory_viz `extract_snapshot.py` | ~1588 ms | Python pickle decode + dedup + JSON dump (6.8 MiB) for the native Rust viewer |
 | memviz/neo `parse_intern` (all)        | ~1040 ms   | decode + frame/stack interning + alloc/free pairing + top-N + IR emit |
 
 pytorch's `annotate_snapshot` does almost nothing (~15 ms on top of
