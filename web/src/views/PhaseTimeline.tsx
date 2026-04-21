@@ -7,7 +7,10 @@ import { STRIP_FLOATS } from "../types/timeline";
 import { formatBytes, formatTopFrame } from "../utils";
 import { useDataStore } from "../stores/dataStore";
 import { eventIdxAt } from "../compute/eventTimes";
+import { buildStripIndex } from "../compute/stripIndex";
 import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
+import { useNavigation } from "./phaseTimeline/useNavigation";
+import { drawRuler, drawSelectionRect, type Ruler, type RulerType } from "./phaseTimeline/overlays";
 
 import type { Anomaly } from "../compute";
 
@@ -45,34 +48,6 @@ import {
 
 const MARGIN = { top: 24, right: 24, bottom: 44, left: 88 };
 
-
-type RulerType = "vertical" | "horizontal";
-interface Ruler {
-  type: RulerType;
-  startPx: { x: number; y: number };
-  endPx: { x: number; y: number };
-}
-
-function formatTime(us: number): string {
-  if (us < 1000) return `${us.toFixed(0)}\u00b5s`;
-  if (us < 1e6) return `${(us / 1000).toFixed(2)}ms`;
-  return `${(us / 1e6).toFixed(4)}s`;
-}
-
-function drawPill(ctx: CanvasRenderingContext2D, text: string, cx: number, cy: number) {
-  ctx.font = FONT_MONO;
-  const tw = ctx.measureText(text).width;
-  const px = 6, py = 4;
-  const rw = tw + px * 2, rh = 14 + py * 2;
-  const rx = cx - rw / 2, ry = cy - rh / 2;
-  ctx.fillStyle = COLOR_ACCENT;
-  ctx.fillRect(rx, ry, rw, rh);
-  ctx.fillStyle = "#0a0a0b";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, cx, cy);
-  ctx.textBaseline = "alphabetic";
-}
 
 export default function PhaseTimeline({
   data,
@@ -200,33 +175,13 @@ export default function PhaseTimeline({
   const stripCount = useDataStore((s) => s.timelineStripCount);
   const framePool = useDataStore((s) => s.framePool);
 
-  // Pre-bucketed max-y by time. Built once per rank so pan/zoom can
-  // compute window-max in O(B) bucket reads (~256) instead of
-  // scanning every strip every viewRange change.
-  const timeBuckets = useMemo(() => {
-    if (!stripBuffer) return null;
-    if (totalXRange <= 0) return null;
-    const B = 256;
-    const bw = totalXRange / B;
-    const bMax = new Float32Array(B);
-    for (const alloc of allocs) {
-      const sz = alloc.size;
-      const off0 = alloc.stripOffset;
-      const count = alloc.stripCount;
-      for (let si = 0; si < count; si++) {
-        const off = (off0 + si) * STRIP_FLOATS;
-        const ts = stripBuffer[off];       // already normalized vs time_min
-        const te = stripBuffer[off + 1];
-        const top = stripBuffer[off + 2] + sz;
-        const bStart = Math.max(0, Math.floor(ts / bw));
-        const bEnd = Math.min(B - 1, Math.floor((te - 1) / bw));
-        for (let b = bStart; b <= bEnd; b++) {
-          if (top > bMax[b]) bMax[b] = top;
-        }
-      }
-    }
-    return { bMax, bw, B };
-  }, [allocs, stripBuffer, totalXRange, xAxisMode]);
+  // One-pass bucket index: per-bucket max-y (Y auto-fit) + per-bucket
+  // candidate alloc lists (hit-test). O(B) reads per frame instead of
+  // O(N allocs).
+  const stripIndex = useMemo(
+    () => (stripBuffer ? buildStripIndex(allocs, stripBuffer, totalXRange) : null),
+    [allocs, stripBuffer, totalXRange, xAxisMode],
+  );
 
   // maxBytes is computed inside the rAF loop from viewRangeRef — no
   // useMemo because viewRangeRef isn't reactive. Mouse handlers read
@@ -240,8 +195,8 @@ export default function PhaseTimeline({
     if (tMin <= fullMin && tMax >= fullMax && maxBytesFull > 0) {
       return maxBytesFull;
     }
-    if (!timeBuckets) return data.peak_bytes * 1.1;
-    const { bMax, bw, B } = timeBuckets;
+    if (!stripIndex) return data.peak_bytes * 1.1;
+    const { bMax, bw, B } = stripIndex;
     // Bucket boundaries share units with stripBuffer — view range
     // must be converted to the same frame.
     const originOff = xAxisMode === "event" ? 0 : data.time_min;
@@ -465,8 +420,8 @@ export default function PhaseTimeline({
       // frame of pure overhead even for allocs entirely off-screen.
       let visibleBIs: Int32Array | null = null;
       let visibleCount = 0;
-      if (buf && hitIndex) {
-        const { packed, bw, B } = hitIndex;
+      if (buf && stripIndex) {
+        const { packed, bw, B } = stripIndex;
         const bStart = Math.max(0, Math.floor((tMin - t0) / bw));
         const bEnd = Math.min(B - 1, Math.floor((tMax - t0) / bw));
         let total = 0;
@@ -730,55 +685,16 @@ export default function PhaseTimeline({
 
     // Ruler
     if (ruler) {
-      const { type, startPx, endPx } = ruler;
-      ctx.save(); ctx.lineWidth = 1.5;
-      if (type === "vertical") {
-        const x = startPx.x, yTop = Math.min(startPx.y, endPx.y), yBot = Math.max(startPx.y, endPx.y);
-        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(217,249,157,0.4)";
-        ctx.beginPath(); ctx.moveTo(MARGIN.left, yTop); ctx.lineTo(MARGIN.left + plotW, yTop);
-        ctx.moveTo(MARGIN.left, yBot); ctx.lineTo(MARGIN.left + plotW, yBot); ctx.stroke();
-        ctx.setLineDash([]); ctx.strokeStyle = COLOR_ACCENT;
-        ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot);
-        ctx.moveTo(x - 6, yTop); ctx.lineTo(x + 6, yTop); ctx.moveTo(x - 6, yBot); ctx.lineTo(x + 6, yBot); ctx.stroke();
-        const bTop = yToBytes(yTop), bBot = yToBytes(yBot);
-        drawPill(ctx, formatBytes(bTop), x + 50, yTop); drawPill(ctx, formatBytes(bBot), x + 50, yBot);
-        drawPill(ctx, `\u0394 ${formatBytes(Math.abs(bTop - bBot))}`, x + 50, (yTop + yBot) / 2);
-      } else {
-        const y = startPx.y, xL = Math.min(startPx.x, endPx.x), xR = Math.max(startPx.x, endPx.x);
-        ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(217,249,157,0.4)";
-        ctx.beginPath(); ctx.moveTo(xL, MARGIN.top); ctx.lineTo(xL, MARGIN.top + plotH);
-        ctx.moveTo(xR, MARGIN.top); ctx.lineTo(xR, MARGIN.top + plotH); ctx.stroke();
-        ctx.setLineDash([]); ctx.strokeStyle = COLOR_ACCENT;
-        ctx.beginPath(); ctx.moveTo(xL, y); ctx.lineTo(xR, y);
-        ctx.moveTo(xL, y - 6); ctx.lineTo(xL, y + 6); ctx.moveTo(xR, y - 6); ctx.lineTo(xR, y + 6); ctx.stroke();
-        const tL = xToTime(xL), tR = xToTime(xR), delta = Math.abs(tR - tL);
-        const fmt = xAxisMode === "event"
-          ? (v: number) => `#${Math.round(v).toLocaleString()}`
-          : (v: number) => formatTime(v - data.time_min);
-        drawPill(ctx, fmt(tL), xL, y - 16); drawPill(ctx, fmt(tR), xR, y - 16);
-        drawPill(
-          ctx,
-          xAxisMode === "event"
-            ? `\u0394 ${Math.round(delta).toLocaleString()} evt`
-            : `\u0394 ${formatTime(delta)}`,
-          (xL + xR) / 2,
-          y + 16,
-        );
-      }
-      ctx.restore();
+      drawRuler(ctx,
+        ruler,
+        { left: MARGIN.left, top: MARGIN.top, w: plotW, h: plotH },
+        xAxisMode, data.time_min, yToBytes, xToTime);
     }
 
     // Selection rectangle
     if (selRect) {
-      const sx1 = Math.min(selRect.x1, selRect.x2), sy1 = Math.min(selRect.y1, selRect.y2);
-      const sw = Math.abs(selRect.x2 - selRect.x1), sh = Math.abs(selRect.y2 - selRect.y1);
-      ctx.fillStyle = "rgba(10,10,11,0.55)";
-      ctx.fillRect(MARGIN.left, MARGIN.top, plotW, sy1 - MARGIN.top);
-      ctx.fillRect(MARGIN.left, sy1 + sh, plotW, MARGIN.top + plotH - sy1 - sh);
-      ctx.fillRect(MARGIN.left, sy1, sx1 - MARGIN.left, sh);
-      ctx.fillRect(sx1 + sw, sy1, MARGIN.left + plotW - sx1 - sw, sh);
-      ctx.strokeStyle = COLOR_ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
-      ctx.strokeRect(sx1, sy1, sw, sh); ctx.setLineDash([]);
+      drawSelectionRect(ctx, selRect,
+        { left: MARGIN.left, top: MARGIN.top, w: plotW, h: plotH });
     }
     }; // end of draw fn
     rafId = requestAnimationFrame(draw);
@@ -789,38 +705,8 @@ export default function PhaseTimeline({
   // hoverAlloc / hoverAnomaly are NOT in deps: they live in refs and
   // the rAF loop picks up changes via invalidate(). Adding them would
   // undo the whole point of the refactor.
-  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedAlloc, timeBuckets, framePool, maxBytesFull]);
+  }, [data, allocs, stripBuffer, anomalies, width, height, timeToX, xToTime, bytesToY, yToBytes, plotW, plotH, selectedAlloc, stripIndex, framePool, maxBytesFull]);
 
-  // Bucketed hit index: each time bucket lists the alloc indices whose
-  // strips intersect that bucket. hitTest only scans candidates for the
-  // cursor's bucket — O(N/B) vs O(N) at 20k+ allocs.
-  const hitIndex = useMemo(() => {
-    if (!stripBuffer) return null;
-    if (totalXRange <= 0) return null;
-    const B = 256;
-    const bw = totalXRange / B;
-    const lists: Set<number>[] = Array.from({ length: B }, () => new Set());
-    for (let bi = 0; bi < allocs.length; bi++) {
-      const alloc = allocs[bi];
-      const off0 = alloc.stripOffset;
-      const count = alloc.stripCount;
-      for (let si = 0; si < count; si++) {
-        const off = (off0 + si) * STRIP_FLOATS;
-        const ts = stripBuffer[off];
-        const te = stripBuffer[off + 1];
-        const bStart = Math.max(0, Math.floor(ts / bw));
-        const bEnd = Math.min(B - 1, Math.floor((te - 1) / bw));
-        for (let b = bStart; b <= bEnd; b++) lists[b].add(bi);
-      }
-    }
-    const packed = lists.map((s) => {
-      const a = new Int32Array(s.size);
-      let i = 0;
-      for (const v of s) a[i++] = v;
-      return a;
-    });
-    return { packed, bw, B };
-  }, [allocs, stripBuffer, totalXRange]);
 
   const hitTest = useCallback(
     (mx: number, my: number): TimelineAlloc | null => {
@@ -832,8 +718,8 @@ export default function PhaseTimeline({
       if (mouseBytes < 0) return null;
       const tN = t - timeOrigin;
 
-      if (hitIndex) {
-        const { packed, bw, B } = hitIndex;
+      if (stripIndex) {
+        const { packed, bw, B } = stripIndex;
         const bIdx = Math.min(B - 1, Math.max(0, Math.floor(tN / bw)));
         const cand = packed[bIdx];
         // Scan newest-first so later allocations win on overlap (matches
@@ -875,7 +761,7 @@ export default function PhaseTimeline({
       }
       return null;
     },
-    [allocs, stripBuffer, timeOrigin, xToTime, yToBytes, plotW, plotH, hitIndex],
+    [allocs, stripBuffer, timeOrigin, xToTime, yToBytes, plotW, plotH, stripIndex],
   );
 
   // rAF-throttle the hover hit-test. For 20k+ allocs the per-mousemove
@@ -1023,124 +909,13 @@ export default function PhaseTimeline({
     keysDownRef.current.delete(e.key.toLowerCase());
   }, []);
 
-  // Continuous smooth navigation via rAF while WASD/arrows are held.
-  // Writes viewRangeRef directly; the render loop above picks it up.
-  const navRafRef = useRef<number>(0);
-
-  useEffect(() => {
-    let running = true;
-    function tick() {
-      if (!running) return;
-      const keys = keysDownRef.current;
-      const shift = keys.has("shift");
-      const hasYZoom = shift && (keys.has("w") || keys.has("s") || keys.has("arrowup") || keys.has("arrowdown"));
-      const hasYPan  = shift && (keys.has("a") || keys.has("d") || keys.has("arrowleft") || keys.has("arrowright"));
-      const hasXNav = !shift && (keys.has("a") || keys.has("d") || keys.has("w") || keys.has("s")
-        || keys.has("arrowleft") || keys.has("arrowright") || keys.has("arrowup") || keys.has("arrowdown"));
-
-      if (hasYZoom) {
-        // Shift+W/S → zoom Y around the view center. Seeds manual range
-        // from the current auto-fit the first time, then grows/shrinks it.
-        const zoomRate = 0.97;
-        let cur = manualYRangeRef.current;
-        if (!cur) cur = [yRangeRef.current[0], yRangeRef.current[1]];
-        const [yMin0, yMax0] = cur;
-        const span = yMax0 - yMin0;
-        const c = (yMin0 + yMax0) / 2;
-        const peakCap = (data.peak_bytes || yMax0) * 1.1;
-        let nYMin = yMin0, nYMax = yMax0;
-        if (keys.has("w") || keys.has("arrowup")) {
-          const ns = span * zoomRate;
-          if (ns > Math.max(1, peakCap * 0.001)) {
-            nYMin = Math.max(0, c - ns / 2);
-            nYMax = nYMin + ns;
-          }
-        }
-        if (keys.has("s") || keys.has("arrowdown")) {
-          const ns = Math.min(peakCap, span / zoomRate);
-          nYMin = Math.max(0, c - ns / 2);
-          nYMax = Math.min(peakCap, nYMin + ns);
-        }
-        if (nYMin !== yMin0 || nYMax !== yMax0) {
-          manualYRangeRef.current = [nYMin, nYMax];
-          invalidate();
-        }
-      }
-
-      if (hasYPan) {
-        // Shift+A/D → pan Y. D (right) scrolls toward larger bytes
-        // (upward in the plot); A (left) toward the baseline. Seeds
-        // from auto-fit on first use so the first keystroke doesn't
-        // collapse the view.
-        let cur = manualYRangeRef.current;
-        if (!cur) cur = [yRangeRef.current[0], yRangeRef.current[1]];
-        const [yMin0, yMax0] = cur;
-        const span = yMax0 - yMin0;
-        const peakCap = (data.peak_bytes || yMax0) * 1.1;
-        const panRate = span * 0.02;
-        let nYMin = yMin0, nYMax = yMax0;
-        if (keys.has("d") || keys.has("arrowright")) {
-          nYMax = Math.min(peakCap, yMax0 + panRate);
-          nYMin = nYMax - span;
-        }
-        if (keys.has("a") || keys.has("arrowleft")) {
-          nYMin = Math.max(0, yMin0 - panRate);
-          nYMax = nYMin + span;
-        }
-        if (nYMin !== yMin0 || nYMax !== yMax0) {
-          manualYRangeRef.current = [nYMin, nYMax];
-          invalidate();
-        }
-      }
-
-      if (hasXNav) {
-        const [tMin, tMax] = viewRangeRef.current;
-        const range = tMax - tMin;
-        // Bounds track whichever axis mode is active.
-        const absMin = xAxisMode === "event" ? 0 : data.time_min;
-        const absMax = xAxisMode === "event" ? totalXRange : data.time_max;
-        const fullRange = absMax - absMin;
-        const panRate = range * 0.02; // 2% per frame (~60fps = smooth scroll)
-        const zoomRate = 0.97; // zoom in 3% per frame
-        // Minimum visible span: 100 μs in time mode, 1 event in event mode.
-        const minRange = xAxisMode === "event" ? 1 : 100;
-        let newMin = tMin, newMax = tMax;
-
-        if (keys.has("a") || keys.has("arrowleft")) {
-          newMin = Math.max(absMin, tMin - panRate);
-          newMax = newMin + range;
-        }
-        if (keys.has("d") || keys.has("arrowright")) {
-          newMax = Math.min(absMax, tMax + panRate);
-          newMin = newMax - range;
-        }
-        if (keys.has("w") || keys.has("arrowup")) {
-          const nr = range * zoomRate;
-          if (nr > minRange) {
-            const c = (newMin + newMax) / 2;
-            newMin = Math.max(absMin, c - nr / 2);
-            newMax = Math.min(absMax, newMin + nr);
-          }
-        }
-        if (keys.has("s") || keys.has("arrowdown")) {
-          const nr = Math.min(fullRange, range / zoomRate);
-          const c = (newMin + newMax) / 2;
-          newMin = Math.max(absMin, c - nr / 2);
-          newMax = Math.min(absMax, newMin + nr);
-        }
-
-        if (newMin !== tMin || newMax !== tMax) {
-          viewRangeRef.current = [newMin, newMax];
-          invalidate();
-        }
-      }
-      navRafRef.current = requestAnimationFrame(tick);
-    }
-    navRafRef.current = requestAnimationFrame(tick);
-    return () => { running = false; cancelAnimationFrame(navRafRef.current); };
-    // Refs + data.peak_bytes change with the same rank swap that already
-    // re-fires via data.time_min/max; intentionally omitted.
-  }, [data.time_min, data.time_max, xAxisMode, totalXRange]); // eslint-disable-line react-hooks/exhaustive-deps
+  useNavigation({
+    keysDownRef, viewRangeRef, yRangeRef, manualYRangeRef,
+    peakBytes: data.peak_bytes,
+    timeMin: data.time_min,
+    timeMax: data.time_max,
+    xAxisMode, totalXRange, invalidate,
+  });
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
