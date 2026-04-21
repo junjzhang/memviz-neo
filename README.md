@@ -147,9 +147,9 @@ First-time setup: **Settings → Pages → Source: GitHub Actions**.
 
 ## Roadmap
 
-- **Multi-rank diff + insights** — side-by-side comparison across ranks of the same run, auto-surfaced observations (peak skew, allocator stalls, leak suspects concentrated on one rank).
-- **Agent-friendly interface** — headless CLI + exposed parser/analysis primitives so code agents can consume snapshots via scripted calls and skill invocations, not just the browser UI.
-- **Better anomaly detection** — beyond pending-free + large-long-lived: fragmentation patterns, cross-rank outliers, allocator misconfiguration heuristics.
+- [ ] **Multi-rank diff + insights** — side-by-side comparison across ranks of the same run, auto-surfaced observations (peak skew, allocator stalls, leak suspects concentrated on one rank).
+- [ ] **Agent-friendly interface** — headless CLI + exposed parser/analysis primitives so code agents can consume snapshots via scripted calls and skill invocations, not just the browser UI.
+- [ ] **Better anomaly detection** — beyond pending-free + large-long-lived: fragmentation patterns, cross-rank outliers, allocator misconfiguration heuristics.
 
 ## Acknowledgements
 
