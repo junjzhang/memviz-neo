@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import type { Anomaly } from "../compute";
 import { useDataStore } from "../stores/dataStore";
 import { formatBytes, formatTopFrame } from "../utils";
+import TablePager from "../components/TablePager";
 
 const TYPE_LABELS: Record<string, string> = {
   pending_free: "Pending Free",
@@ -64,25 +65,12 @@ export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
           tone="orange"
         />
         <div style={{ flex: 1 }} />
-        <span className="mono faint" style={{ fontSize: 11 }}>
-          {safePage * PAGE_SIZE + 1}–{Math.min((safePage + 1) * PAGE_SIZE, filtered.length)} / {filtered.length}
-        </span>
-        <button
-          className="btn"
-          style={{ padding: "4px 12px", fontSize: 11 }}
-          disabled={safePage === 0}
-          onClick={() => setPage((p) => Math.max(0, p - 1))}
-        >
-          ←
-        </button>
-        <button
-          className="btn"
-          style={{ padding: "4px 12px", fontSize: 11 }}
-          disabled={safePage >= totalPages - 1}
-          onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-        >
-          →
-        </button>
+        <TablePager
+          page={safePage}
+          total={filtered.length}
+          pageSize={PAGE_SIZE}
+          onChange={setPage}
+        />
       </div>
       <div style={{ borderTop: "1px solid var(--border)" }}>
         <table className="dtable">

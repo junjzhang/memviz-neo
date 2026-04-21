@@ -6,6 +6,7 @@ import type {
 import { STRIP_FLOATS } from "../types/timeline";
 import { formatBytes, formatTopFrame } from "../utils";
 import { useDataStore } from "../stores/dataStore";
+import { eventIdxAt } from "../compute/eventTimes";
 import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
 
 import type { Anomaly } from "../compute";
@@ -285,14 +286,7 @@ export default function PhaseTimeline({
   const usToView = useCallback(
     (us: number) => {
       if (xAxisMode !== "event" || !eventTimesArr || eventTimesArr.length === 0) return us;
-      const target = us - data.time_min;
-      let lo = 0, hi = eventTimesArr.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (eventTimesArr[mid] < target) lo = mid + 1;
-        else hi = mid;
-      }
-      return lo;
+      return eventIdxAt(eventTimesArr, us - data.time_min);
     },
     [xAxisMode, eventTimesArr, data.time_min],
   );

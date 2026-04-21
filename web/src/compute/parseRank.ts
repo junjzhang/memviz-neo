@@ -15,6 +15,8 @@ import type { Anomaly } from "./anomalies";
 import { detectAnomalies } from "./anomalies";
 import type { Allocation, RankData, SegmentRow, SegmentAlloc, FlameData, FlameNode } from "./index";
 import { blockColor } from "./palette";
+import { eventIdxAt } from "./eventTimes";
+import { isInternalFrame } from "../utils";
 
 export interface ParseResult {
   data: RankData;
@@ -188,15 +190,6 @@ function packStrips(
     if (a.free_us >= 0) eventSet.add(a.free_us - timeMin);
   }
   const eventTimes = Float64Array.from([...eventSet].sort((a, b) => a - b));
-  function eventIdxAt(tNorm: number): number {
-    let lo = 0, hi = eventTimes.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (eventTimes[mid] < tNorm) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
 
   const stripBuffer = new Float32Array(totalStrips * STRIP_FLOATS);
   const timelineAllocs: TimelineAlloc[] = new Array(n);
@@ -260,8 +253,8 @@ function packStrips(
   const stripBufferEvent = new Float32Array(stripBuffer.length);
   for (let s = 0; s < totalStrips; s++) {
     const off = s * STRIP_FLOATS;
-    stripBufferEvent[off]     = eventIdxAt(stripBuffer[off]);
-    stripBufferEvent[off + 1] = eventIdxAt(stripBuffer[off + 1]);
+    stripBufferEvent[off]     = eventIdxAt(eventTimes, stripBuffer[off]);
+    stripBufferEvent[off + 1] = eventIdxAt(eventTimes, stripBuffer[off + 1]);
     stripBufferEvent[off + 2] = stripBuffer[off + 2];
     stripBufferEvent[off + 3] = stripBuffer[off + 3];
     stripBufferEvent[off + 4] = stripBuffer[off + 4];
@@ -351,15 +344,6 @@ function buildFlameGraph(
   interface Trie { frameIdx: number; weight: number; kids: Map<number, Trie>; }
   const root: Trie = { frameIdx: -1, weight: 0, kids: new Map() };
 
-  function isInternal(fi: number): boolean {
-    const f = framePool[fi];
-    if (!f) return true;
-    if (f.filename === "??") return true;
-    if (f.name.includes("CUDACachingAllocator")) return true;
-    if (f.filename.includes("memory_snapshot")) return true;
-    return false;
-  }
-
   for (const a of topAllocsIR) {
     const lifetime = a.free_us === -1 ? (timeMax - a.alloc_us) : (a.free_us - a.alloc_us);
     if (lifetime <= 0) continue;
@@ -372,7 +356,8 @@ function buildFlameGraph(
     let cursor = root;
     for (let k = stack.length - 1; k >= 0; k--) {
       const fi = stack[k];
-      if (isInternal(fi)) continue;
+      const f = framePool[fi];
+      if (!f || isInternalFrame(f)) continue;
       let child = cursor.kids.get(fi);
       if (!child) {
         child = { frameIdx: fi, weight: 0, kids: new Map() };

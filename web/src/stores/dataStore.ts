@@ -12,6 +12,7 @@ import type {
 } from "../types/timeline";
 import type { RankData, Anomaly, SegmentRow, FlameData } from "../compute";
 import { getActivePool } from "./fileStore";
+import { formatTopFrame } from "../utils";
 
 // Main-thread "current rank" store. We hold the full RankData only for
 // the currently-selected rank (plus a small LRU for recently-visited
@@ -192,19 +193,7 @@ export const useDataStore = create<DataState>((set, get) => ({
                    : { name: "", filename: "", line: 0 };
         })
       : [];
-    const topFrame =
-      entry.top_frame_idx >= 0 && rd.framePool[entry.top_frame_idx]
-        ? (() => {
-            const f = rd.framePool[entry.top_frame_idx];
-            const n = f.name.split("(")[0].split("<")[0].trim();
-            if (f.filename.includes(".py")) {
-              const i = f.filename.lastIndexOf("/");
-              const short = i >= 0 ? f.filename.slice(i + 1) : f.filename;
-              return `${n} @ ${short}:${f.line}`;
-            }
-            return n.length > 60 ? n.slice(0, 57) + "..." : n;
-          })()
-        : "";
+    const topFrame = formatTopFrame(entry.top_frame_idx, rd.framePool);
     return {
       addr,
       size: entry.size,

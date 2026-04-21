@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { useDataStore } from "../stores/dataStore";
 import type { AllocationDetail } from "../types/timeline";
-import { formatBytes } from "../utils";
+import { formatBytes, isInternalFrame } from "../utils";
 
 export function TimelineHints() {
   return (
@@ -68,12 +68,7 @@ export function TimelineDetailPanel() {
       const t = e.target as HTMLElement | null;
       if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
       const trace = detail.frames
-        .filter(
-          (f) =>
-            f.filename !== "??" &&
-            !f.name.includes("CUDACachingAllocator") &&
-            !f.filename.includes("memory_snapshot"),
-        )
+        .filter((f) => !isInternalFrame(f))
         .map((f) => `${f.name} @ ${f.filename}:${f.line}`)
         .join("\n");
       navigator.clipboard.writeText(`${formatBytes(detail.size)} 0x${detail.addr.toString(16)}\n${trace}`);
@@ -142,12 +137,7 @@ export function TimelineDetailPanel() {
       </div>
       <div className="tl-detail-trace mono">
         {detail.frames
-          .filter(
-            (f) =>
-              f.filename !== "??" &&
-              !f.name.includes("CUDACachingAllocator") &&
-              !f.filename.includes("memory_snapshot"),
-          )
+          .filter((f) => !isInternalFrame(f))
           .map((f, i) => {
             const isPython = f.filename.includes(".py");
             return (

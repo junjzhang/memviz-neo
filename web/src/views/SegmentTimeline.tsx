@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TimelineData } from "../types/timeline";
 import type { SegmentRow, SegmentAlloc } from "../compute";
+import { eventIdxAt } from "../compute/eventTimes";
 import { formatBytes, formatTopFrame } from "../utils";
 import { initGL, uploadStrips, drawStrips, type GLState } from "./glRenderer";
 import { useDataStore } from "../stores/dataStore";
@@ -100,18 +101,7 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
     const buf = new Float32Array(totalAllocs * 7);
     const tMax = data.time_max;
     const tOrigin = data.time_min;
-    // Reused binary search for event-mode X mapping.
     const et = eventTimes;
-    const eventIdx = (tUsNorm: number): number => {
-      if (!et) return 0;
-      let lo = 0, hi = et.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (et[mid] < tUsNorm) lo = mid + 1;
-        else hi = mid;
-      }
-      return lo;
-    };
     let w = 0;
     for (let ri = 0; ri < rows.length; ri++) {
       const row = rows[ri];
@@ -129,8 +119,8 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
         let x0 = a.alloc_us - tOrigin;
         let x1 = freeUs - tOrigin;
         if (mode === "event" && et) {
-          x0 = eventIdx(x0);
-          x1 = eventIdx(x1);
+          x0 = eventIdxAt(et, x0);
+          x1 = eventIdxAt(et, x1);
         }
         buf[w * 7]     = x0;
         buf[w * 7 + 1] = x1;
@@ -262,15 +252,7 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
       const vMinN = vMin - viewOrigin;
       const usToPx = (us: number): number => {
         let x = us - data.time_min;
-        if (mode === "event" && eventTimes) {
-          let lo = 0, hi = eventTimes.length - 1;
-          while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            if (eventTimes[mid] < x) lo = mid + 1;
-            else hi = mid;
-          }
-          x = lo;
-        }
+        if (mode === "event" && eventTimes) x = eventIdxAt(eventTimes, x);
         return plotLeft + ((x - vMinN) / span) * plotW;
       };
 
@@ -366,17 +348,6 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
     const xTolUnits = (span / plotW) * 3;
     const yTol = 2;
 
-    const idx = (t: number) => {
-      if (!eventTimes) return t;
-      let lo = 0, hi = eventTimes.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (eventTimes[mid] < t) lo = mid + 1;
-        else hi = mid;
-      }
-      return lo;
-    };
-
     let best: { alloc: SegmentAlloc; span: number } | null = null;
     for (const a of row.allocs) {
       const yTopPx = rowYTop + (a.offsetInSeg * inv) * rowHPx;
@@ -385,7 +356,10 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
       const freeUs = a.free_us < 0 ? data.time_max : a.free_us;
       let x0 = a.alloc_us - tOrigin;
       let x1 = freeUs - tOrigin;
-      if (mode === "event" && eventTimes) { x0 = idx(x0); x1 = idx(x1); }
+      if (mode === "event" && eventTimes) {
+        x0 = eventIdxAt(eventTimes, x0);
+        x1 = eventIdxAt(eventTimes, x1);
+      }
       if (cursorX < x0 - xTolUnits || cursorX > x1 + xTolUnits) continue;
       const allocSpan = x1 - x0;
       if (!best || allocSpan < best.span) best = { alloc: a, span: allocSpan };

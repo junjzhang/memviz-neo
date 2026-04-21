@@ -212,6 +212,12 @@ fn parse_snapshot(
 
 // ---- Top frame selection ----
 
+fn is_internal(f: &Frame) -> bool {
+    f.filename == "??"
+        || f.name.contains("CUDACachingAllocator")
+        || f.filename.contains("memory_snapshot")
+}
+
 /// Pick the "most meaningful" frame index from a stack:
 ///   first python (.py) frame that isn't a CUDA allocator internal,
 ///   else the first non-internal frame,
@@ -220,18 +226,12 @@ fn resolve_top_frame_from_stack(stack_idx: u32, pools: &Pools) -> u32 {
     let stack = &pools.stack_pool[stack_idx as usize];
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
-            continue;
-        }
-        if f.filename.contains(".py") {
-            return fidx;
-        }
+        if is_internal(f) { continue; }
+        if f.filename.contains(".py") { return fidx; }
     }
     for &fidx in stack {
         let f = &pools.frame_pool[fidx as usize];
-        if f.filename == "??" || f.name.contains("CUDACachingAllocator") || f.filename.contains("memory_snapshot") {
-            continue;
-        }
+        if is_internal(f) { continue; }
         return fidx;
     }
     NO_FRAME

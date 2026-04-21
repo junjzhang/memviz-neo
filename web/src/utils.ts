@@ -1,5 +1,18 @@
 import type { FrameRecord } from "./types/snapshot";
 
+/**
+ * Frames the user doesn't care about: CUDA allocator internals, the
+ * memory_snapshot capture shim, and frames with no source info. Mirrors
+ * the Rust-side is_internal in wasm/src/lib.rs.
+ */
+export function isInternalFrame(f: FrameRecord): boolean {
+  return (
+    f.filename === "??" ||
+    f.name.includes("CUDACachingAllocator") ||
+    f.filename.includes("memory_snapshot")
+  );
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { TopAllocation } from "../types/snapshot";
 import { formatBytes, formatTopFrame } from "../utils";
 import { useDataStore } from "../stores/dataStore";
+import TablePager from "../components/TablePager";
 
 interface Props {
   data: TopAllocation[];
@@ -111,25 +112,12 @@ export default function TopAllocations({ data }: Props) {
             paddingTop: 12,
           }}
         >
-          <span className="mono faint" style={{ fontSize: 11 }}>
-            {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, sorted.length)} / {sorted.length}
-          </span>
-          <button
-            className="btn"
-            style={{ padding: "4px 12px", fontSize: 11 }}
-            disabled={page === 0}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-          >
-            ←
-          </button>
-          <button
-            className="btn"
-            style={{ padding: "4px 12px", fontSize: 11 }}
-            disabled={page >= totalPages - 1}
-            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-          >
-            →
-          </button>
+          <TablePager
+            page={page}
+            total={sorted.length}
+            pageSize={PAGE_SIZE}
+            onChange={setPage}
+          />
         </div>
       )}
     </div>
