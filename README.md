@@ -49,11 +49,13 @@ rebuild around three ideas:
 | Cross-view selection linking      | —                        | —                        | **timeline ↔ segment ↔ detail panel** |
 | Address-reuse-aware selection     | —                        | —                        | **keyed on `(addr, alloc_us)`**       |
 
-### Parse-phase benchmark
+### Benchmarks
 
-Same 12.1 MiB pickle (50 k trace events, 90 segments) on one machine.
-Each tool parses different amounts of work up front — the table shows
-what each one actually does before the UI becomes interactive.
+Same 12.1 MiB pickle (50 k trace events, 90 segments, ~18 k allocs in
+the default view) on one machine — Framework laptop, Intel iGPU, 120 Hz
+display.
+
+**Parse** — how long each tool takes before the UI becomes interactive:
 
 |                                          | time     | work done |
 | ---------------------------------------- | -------- | --------- |
@@ -73,10 +75,7 @@ run level the single-pickle gap closes — pytorch shows one pickle at a
 time (8 × 180 ms sequential ≈ 1440 ms), memviz/neo races an 8-rank
 snapshot through 8 workers and finishes in ~1000 ms wall-clock.
 
-### Render benchmark
-
-Same pickle, end-to-end via `bench/render.mjs --headed` (Framework laptop,
-Intel iGPU, 120 Hz display, ~18 k allocs in the default view):
+**Render + memory** — memviz/neo end-to-end via `bench/render.mjs --headed`:
 
 |                 | value |
 | --------------- | ----- |
