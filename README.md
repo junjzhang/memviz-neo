@@ -145,6 +145,12 @@ git tag v0.1.0 && git push origin v0.1.0
 
 First-time setup: **Settings → Pages → Source: GitHub Actions**.
 
+## Roadmap
+
+- **Multi-rank diff + insights** — side-by-side comparison across ranks of the same run, auto-surfaced observations (peak skew, allocator stalls, leak suspects concentrated on one rank).
+- **Agent-friendly interface** — headless CLI + exposed parser/analysis primitives so code agents can consume snapshots via scripted calls and skill invocations, not just the browser UI.
+- **Better anomaly detection** — beyond pending-free + large-long-lived: fragmentation patterns, cross-rank outliers, allocator misconfiguration heuristics.
+
 ## Acknowledgements
 
 - [pytorch/memory_viz](https://docs.pytorch.org/memory_viz) — official viewer; defined the pickle schema.
