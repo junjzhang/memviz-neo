@@ -360,6 +360,21 @@ fn emit_frame_idx(buf: &mut String, idx: u32) {
 
 // ---- WASM entry ----
 
+/// Bench-only: decode pickle bytes into the Rc<Value> tree and return the
+/// node count, nothing else. Direct analogue of pytorch's `unpickle` —
+/// no interning, no pairing, no IR emit. Used to compare pickle-decode
+/// cost apples-to-apples.
+#[wasm_bindgen]
+pub fn parse_pickle_only(data: &[u8]) -> u32 {
+    let root = pickle::parse(data).expect("pickle parse failed");
+    // Force a shallow touch so the optimizer can't DCE the whole parse.
+    match root.as_ref() {
+        RcValue::Dict(cell) => cell.borrow().len() as u32,
+        RcValue::List(cell) => cell.borrow().len() as u32,
+        _ => 0,
+    }
+}
+
 /// Parse pickle, intern frames/stacks, pair alloc/free events, and emit
 /// an Intermediate Representation (IR) JSON that the main thread hands
 /// off to layout workers. Polygon layout runs in pure JS on the layout

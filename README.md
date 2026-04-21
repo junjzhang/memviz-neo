@@ -2,11 +2,12 @@
 
 # memviz/neo
 
-**Browser-native, multi-rank PyTorch GPU memory snapshot viewer.**
+**High-performance, browser-native, multi-rank PyTorch GPU memory snapshot viewer.**
 Drop `rank*.pickle`s into the page — everything parses, computes and renders
 locally. No backend, no upload, no waiting on someone else's server.
 
-[![Live demo](https://img.shields.io/badge/live%20demo-junjzhang.github.io-d9f99d?style=flat-square&labelColor=0a0a0b)](https://junjzhang.github.io/memviz-neo/)
+### [→ Open the app at junjzhang.github.io/memviz-neo ←](https://junjzhang.github.io/memviz-neo/)
+
 [![License: 0BSD](https://img.shields.io/badge/license-0BSD-d9f99d?style=flat-square&labelColor=0a0a0b)](./LICENSE)
 [![Stack: rust · wasm · webgl2](https://img.shields.io/badge/stack-rust%20%C2%B7%20wasm%20%C2%B7%20webgl2-d9f99d?style=flat-square&labelColor=0a0a0b)](#architecture)
 
@@ -35,15 +36,68 @@ rebuild around three ideas:
 
 ![dashboard overview](./docs/screenshots/overview.png)
 
+## How it compares
+
+|                                   | [pytorch/memory_viz][pv] | [desktop_memory_viz][cj] | **memviz/neo**                        |
+| --------------------------------- | ------------------------ | ------------------------ | ------------------------------------- |
+| Runs in                           | browser, static site     | native Rust desktop app  | **browser, static site**              |
+| Install                           | — (URL)                  | `cargo build` + Python   | **— (URL)**                           |
+| Pickle path                       | JS unpickler in-browser  | Python pre-extract → JSON, then Rust | **Rust → WASM with frame interning** |
+| Renderer                          | SVG via D3               | eframe / egui (wgpu)     | **WebGL2 instanced**                  |
+| Multi-rank view                   | pickle dropdown, one at a time | single file             | **whole run in parallel on a worker pool** |
+| Views                             | Active / Segment / State / Settings | Active Memory Timeline only | **Multi-rank · Memory · Segment · Flame · Anomalies** |
+| Call-stack flame (bytes × lifetime) | —                     | —                        | **✓**                                 |
+| Cross-view selection linking      | —                        | —                        | **timeline ↔ segment ↔ detail panel** |
+| Address-reuse-aware selection     | —                        | —                        | **keyed on `(addr, alloc_us)`**       |
+
+### Parse-phase benchmark
+
+Same 12.1 MiB pickle (50 k trace events, 90 segments) on one machine.
+Two measurements — one apples-to-apples, one showing what each tool
+actually does up front.
+
+**Pickle decode only** (bytes → in-memory object graph):
+
+|                                            | time    |
+| ------------------------------------------ | ------- |
+| `pytorch` `unpickle` (hand-rolled JS)      | ~164 ms |
+| `memviz/neo` `parse_pickle_only` (Rust/WASM) | **~92 ms** |
+
+The `Rc`-shared `Value` tree handles `MEMOIZE`/`BINGET` with one refcount
+bump instead of a JS object walk — ~1.8× faster than pytorch's JS
+unpickler.
+
+**Full parse pipeline** (what each tool actually runs up front):
+
+|                                          | time    | work done |
+| ---------------------------------------- | ------- | --------- |
+| `pytorch` `unpickle` + `annotate_snapshot` | ~163 ms | decode + alloc/free version stamping |
+| `desktop_memory_viz` Python `extract_snapshot.py` | ~1.6 s | decode + JSON dump for native viewer |
+| `memviz/neo` `parse_intern` (all)        | ~1040 ms | decode + frame/stack interning + alloc/free pairing + top-N + IR emit |
+
+pytorch defers almost everything to view-open time — d3 walks the JS
+object tree every time the user switches to a view. memviz/neo front-loads
+all of it: frames intern down from 3.5 M entries to ~1400 unique
+(`u32` per event after that), allocs get paired with orphan-baseline
+reconstruction, top-N gets sorted, and the layout worker receives a
+pre-baked IR so it never revisits the pickle.
+
+Net: **pytorch parses faster, memviz/neo switches views faster.** At the
+run level the single-pickle gap closes — pytorch shows one pickle at a
+time (8 × 180 ms sequential ≈ 1.44 s), memviz/neo races an 8-rank
+snapshot through 8 workers and finishes in ~1 s wall-clock.
+
+Reproduce with `node bench/memviz.mjs` and `node bench/pytorch.mjs` —
+see [`bench/README.md`](./bench/README.md).
+
+[pv]: https://docs.pytorch.org/memory_viz
+[cj]: https://github.com/C-J-Cundy/desktop_memory_viz
+
 ## Views at a glance
 
-<table>
-<tr>
-<td width="60%" valign="top">
-
-**Multi-Rank Overview** — one bar per rank, heights scale on the peak
-(not end-of-window), click to switch focus. Parsing is truly parallel, so on
-a 128-rank run the dashboard paints the moment *any* worker reports back.
+**Multi-Rank Overview** — one bar per rank, heights scale on the peak (not
+end-of-window), click to switch focus. Parsing is truly parallel, so on a
+128-rank run the dashboard paints the moment *any* worker reports back.
 
 **Memory Timeline** — WebGL2 instanced strip rendering of every allocation
 in the top-N. `WASD` to pan/zoom X, `Shift+WASD` for Y, drag a box to zoom
@@ -52,28 +106,21 @@ X-axis toggles between wall-clock μs and alloc/free event ordinal so dense
 training phases stretch out instead of collapsing into a smear.
 
 **Segment Timeline** — one row per caching-allocator segment, allocs drawn
-at their in-segment offset. Pan/zoom locks to the Memory Timeline. Selecting
-an alloc expands its segment row from 30 → 120 px so small allocs inside
-big segments become actually readable.
-
-**Memory Flame Graph** — call-stack rolled up by `bytes × lifetime`, so
-the paths that hold memory longest dominate the view. Drill-in breadcrumb,
-hover tooltip, all in the same six-hue theme palette as the rest of the
-dashboard.
+at their in-segment offset. Pan/zoom locks to the Memory Timeline.
+Selecting an alloc expands its segment row from 30 → 120 px so small
+allocs inside big segments become actually readable.
 
 **Anomalies** — flags pending-free stalls (`free_requested` but not
 `free_completed`, usually a cross-stream sync hiccup) and leak suspects
 (large long-lived allocs still alive at snapshot). Each anomaly cross-links
 back to the timeline for a zoom-to-spot focus.
 
-</td>
-<td width="40%" valign="top">
+**Memory Flame Graph** — call-stack rolled up by `bytes × lifetime`, so
+the paths that hold memory longest dominate the view. Drill-in breadcrumb,
+hover tooltip, all in the same six-hue theme palette as the rest of the
+dashboard.
 
 ![flame graph](./docs/screenshots/flamegraph.png)
-
-</td>
-</tr>
-</table>
 
 ## Usage
 
