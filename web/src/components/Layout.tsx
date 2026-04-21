@@ -119,6 +119,11 @@ export default function Layout({ children }: { children: ReactNode }) {
               )}
             </>
           )}
+          <span className="hx-sep">·</span>
+          <span className="hx" title="Build version">
+            <span className="hx-k">ver</span>
+            <span className="hx-v">{__APP_VERSION__}</span>
+          </span>
         </div>
       </header>
 

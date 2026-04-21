@@ -1,12 +1,14 @@
-name: Deploy to GitHub Pages
+name: Release
 
+# Only version tags (v0.1.0, v1.2.3, …) deploy to GitHub Pages and
+# create a release. Plain pushes to main run ci.yml instead.
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # create releases
   pages: write
   id-token: write
 
@@ -55,10 +57,11 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
 
-      - name: Build
+      - name: Build (inject tag as version)
         working-directory: web
         env:
           VITE_BASE: /memviz-neo/
+          VITE_APP_VERSION: ${{ github.ref_name }}
         run: pnpm build
 
       - name: Upload Pages artifact
@@ -66,7 +69,7 @@ jobs:
         with:
           path: web/dist
 
-  deploy:
+  deploy-pages:
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -76,3 +79,18 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release notes generator walks commit history
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true

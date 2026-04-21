@@ -132,12 +132,18 @@ Synthetic snapshots for perf work:
 python scripts/gen_test_data.py --ranks 8 --events 20000 --out test_data/
 ```
 
-## Deploy
+## Release
 
-`main` auto-deploys to GitHub Pages via
-[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml)
-(builds WASM + Vite with `VITE_BASE=/memviz-neo/`). First-time setup only
-needs **Settings → Pages → Source: GitHub Actions**.
+Tag-driven. Push `main` → [`ci.yml`](./.github/workflows/ci.yml) runs
+typecheck + build, no deploy. Push a `v*` tag → [`release.yml`](./.github/workflows/release.yml)
+builds with `VITE_APP_VERSION=${tag}`, deploys to GitHub Pages, and
+creates a GitHub Release with auto-generated notes.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+First-time setup: **Settings → Pages → Source: GitHub Actions**.
 
 ## Acknowledgements
 

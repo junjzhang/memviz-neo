@@ -142,6 +142,10 @@ export default function FileSelector() {
             <span className="fs-fp-k">scope</span>
             <span className="fs-fp-v mono">multi-rank · parallel parse</span>
           </div>
+          <div className="fs-fp-item">
+            <span className="fs-fp-k">version</span>
+            <span className="fs-fp-v mono">{__APP_VERSION__}</span>
+          </div>
         </div>
       </div>
 
