@@ -151,12 +151,13 @@ export default function Layout({ children }: { children: ReactNode }) {
           display: flex;
           align-items: stretch;
           padding: 0 var(--s6);
-          background: var(--bg);
-          border-bottom: 1px solid var(--divider);
+          background: rgba(10,10,11,0.55);
+          border-bottom: 1px solid rgba(42,42,47,0.6);
           position: sticky;
           top: 0;
           z-index: 10;
-          backdrop-filter: blur(8px);
+          backdrop-filter: blur(18px) saturate(1.15);
+          -webkit-backdrop-filter: blur(18px) saturate(1.15);
           min-height: 44px;
         }
         /* Left = interactive controls: buttons + toggle. Distinct by

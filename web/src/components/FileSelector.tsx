@@ -151,12 +151,6 @@ export default function FileSelector() {
       <div className="fs-blob fs-blob-b" />
       <div className="fs-blob fs-blob-c" />
 
-      {/* Decorative corner marks */}
-      <div className="fs-mark fs-mark-tl" />
-      <div className="fs-mark fs-mark-tr" />
-      <div className="fs-mark fs-mark-bl" />
-      <div className="fs-mark fs-mark-br" />
-
       <FsStyle />
     </div>
   );
@@ -224,12 +218,6 @@ function LoadingView({
       <div className="fs-blob fs-blob-a" />
       <div className="fs-blob fs-blob-b" />
       <div className="fs-blob fs-blob-c" />
-
-      {/* Decorative corner marks reused from landing */}
-      <div className="fs-mark fs-mark-tl" />
-      <div className="fs-mark fs-mark-tr" />
-      <div className="fs-mark fs-mark-bl" />
-      <div className="fs-mark fs-mark-br" />
 
       <FsStyle />
     </div>
@@ -306,11 +294,11 @@ function FsStyle() {
       }
       .fs-eyebrow {
         font-family: var(--font-display);
-        font-size: 11px;
-        letter-spacing: 0.24em;
+        font-size: 12px;
+        letter-spacing: 0.22em;
         text-transform: uppercase;
-        color: var(--fg-dim);
-        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+        color: var(--fg);
+        text-shadow: 0 1px 1px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.55);
         margin-bottom: var(--s4);
       }
       /* Oversized display type that marquees left so "memviz/neo neo"
@@ -324,26 +312,27 @@ function FsStyle() {
         color: var(--fg);
         margin: 0 0 var(--s5);
         overflow: hidden;
-        mask-image: linear-gradient(to right, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
-        -webkit-mask-image: linear-gradient(to right, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
       }
       .fs-title-track {
         display: inline-flex;
-        gap: 0.35em;
         animation: fs-marquee 28s linear infinite;
         will-change: transform;
+        transform: translateZ(0);
       }
+      /* Every copy owns an equal-sized trailing space (no flex gap), so
+         shifting by exactly 1/N of the track width lines the next copy
+         up pixel-perfect with the previous one and the loop has no jump. */
       .fs-title-text {
         white-space: nowrap;
-        padding-right: 0.25em;
+        padding-right: 0.35em;
       }
       .fs-title-neo {
         color: var(--accent);
         font-weight: 400;
       }
       @keyframes fs-marquee {
-        from { transform: translateX(0); }
-        to   { transform: translateX(calc(-100% / 3)); }
+        from { transform: translate3d(0, 0, 0); }
+        to   { transform: translate3d(calc(-100% / 3), 0, 0); }
       }
       @media (prefers-reduced-motion: reduce) {
         .fs-title-track { animation: none; }
@@ -369,14 +358,14 @@ function FsStyle() {
         font-size: 10px;
         letter-spacing: 0.18em;
         text-transform: uppercase;
-        color: var(--fg-dim);
-        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+        color: var(--fg-muted);
+        text-shadow: 0 1px 1px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.55);
       }
       .fs-config-hint {
-        font-size: 10px;
+        font-size: 11px;
         letter-spacing: 0.06em;
-        color: var(--fg-dim);
-        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+        color: var(--fg-muted);
+        text-shadow: 0 1px 1px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.55);
       }
       .fs-pills {
         display: inline-flex;
@@ -424,7 +413,6 @@ function FsStyle() {
         display: flex;
         gap: var(--s7);
         padding-top: var(--s5);
-        border-top: 1px solid var(--divider);
       }
       .fs-fp-item { display: flex; flex-direction: column; gap: 4px; }
       .fs-fp-k {
@@ -525,24 +513,10 @@ function FsStyle() {
         gap: var(--s4);
         max-width: 900px;
         padding-top: var(--s3);
-        border-top: 1px solid var(--divider);
         font-size: 11px;
         color: var(--fg-faint);
         letter-spacing: 0.02em;
       }
-
-      /* Corner marks */
-      .fs-mark {
-        position: absolute;
-        width: 20px;
-        height: 20px;
-        border-color: var(--fg-dim);
-        border-style: solid;
-      }
-      .fs-mark-tl { top: 32px; left: 32px; border-width: 1px 0 0 1px; }
-      .fs-mark-tr { top: 32px; right: 32px; border-width: 1px 1px 0 0; }
-      .fs-mark-bl { bottom: 32px; left: 32px; border-width: 0 0 1px 1px; }
-      .fs-mark-br { bottom: 32px; right: 32px; border-width: 0 1px 1px 0; }
     `}</style>
   );
 }

@@ -231,33 +231,35 @@ function Dashboard() {
           >
             {timeline && tlWidth > 0 ? (
               <>
-                <PhaseTimeline
-                  data={timeline}
-                  allocs={timelineAllocs}
-                  anomalies={anomalies}
-                  width={tlWidth}
-                  height={tlHeight}
-                  currentRank={currentRank}
-                  viewRangeRef={viewRangeRef}
-                />
-                {segmentRows.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: 4,
-                      borderTop: "1px dashed var(--divider)",
-                      paddingTop: 4,
-                    }}
-                  >
-                    <SegmentTimeline
-                      data={timeline}
-                      rows={segmentRows}
-                      width={tlWidth}
-                      viewRangeRef={viewRangeRef}
-                      mode={xAxisMode}
-                      eventTimes={eventTimes}
-                    />
-                  </div>
-                )}
+                {/* One focus frame around both plots — either canvas
+                    focused highlights the whole region as a single unit. */}
+                <div className="tl-frame">
+                  <PhaseTimeline
+                    data={timeline}
+                    allocs={timelineAllocs}
+                    anomalies={anomalies}
+                    width={tlWidth}
+                    height={tlHeight}
+                    currentRank={currentRank}
+                    viewRangeRef={viewRangeRef}
+                  />
+                  {segmentRows.length > 0 && (
+                    <div
+                      style={{
+                        borderTop: "1px dashed var(--divider)",
+                      }}
+                    >
+                      <SegmentTimeline
+                        data={timeline}
+                        rows={segmentRows}
+                        width={tlWidth}
+                        viewRangeRef={viewRangeRef}
+                        mode={xAxisMode}
+                        eventTimes={eventTimes}
+                      />
+                    </div>
+                  )}
+                </div>
                 <TimelineHints />
                 <TimelineDetailPanel />
               </>

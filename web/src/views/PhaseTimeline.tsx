@@ -635,17 +635,24 @@ export default function PhaseTimeline({
 
     // --- Overlay effects (hover, rulers, selection) ---
 
-    // Hover range
+    // Range highlight: hover wins while the cursor is on something,
+    // otherwise the clicked (selected) alloc keeps the column visible so
+    // the user can see when it lived without hovering. Color is the
+    // theme accent (--accent = #d9f99d) throughout for consistency.
     const hoverAlloc = hoverAllocRef.current;
     const hoverAnomaly = hoverAnomalyRef.current;
-    if ((hoverAlloc || hoverAnomaly) && !selRect) {
-      const hb = hoverAlloc || allocs.find((b) => b.addr === hoverAnomaly?.anomaly.addr);
-      if (hb) {
+    const hoverResolved =
+      hoverAlloc ||
+      (hoverAnomaly ? allocs.find((b) => b.addr === hoverAnomaly.anomaly.addr) ?? null : null);
+    const rangeAlloc = hoverResolved ?? selectedAlloc;
+    if (rangeAlloc && !selRect) {
+      const hb = rangeAlloc;
+      {
         const rx1 = Math.max(timeToX(usToView(hb.alloc_us)), MARGIN.left);
         const rx2 = Math.min(timeToX(usToView(hb.free_us)), MARGIN.left + plotW);
-        ctx.fillStyle = "rgba(217,249,157,0.05)";
+        ctx.fillStyle = "rgba(217,249,157,0.08)";
         ctx.fillRect(rx1, MARGIN.top, rx2 - rx1, plotH);
-        ctx.strokeStyle = "rgba(217,249,157,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = "rgba(217,249,157,0.55)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
         ctx.beginPath();
         if (rx1 >= MARGIN.left) { ctx.moveTo(rx1, MARGIN.top); ctx.lineTo(rx1, MARGIN.top + plotH); }
         if (rx2 <= MARGIN.left + plotW) { ctx.moveTo(rx2, MARGIN.top); ctx.lineTo(rx2, MARGIN.top + plotH); }
@@ -1185,6 +1192,7 @@ export default function PhaseTimeline({
         />
         <canvas
           ref={canvasRef}
+          className="tl-canvas"
           style={{ position: "relative", background: "transparent" }}
           tabIndex={0}
           onKeyDown={handleKeyDown}
@@ -1257,6 +1265,22 @@ export default function PhaseTimeline({
       </div>
 
       <style>{`
+        /* Each canvas keeps tabIndex for keyboard nav, but we hide their
+           individual focus rings. The wrapping .tl-frame picks up
+           :focus-within and draws a single outline around the two plots
+           so they read as one unit. */
+        .tl-canvas:focus,
+        .tl-canvas:focus-visible { outline: none; }
+        .tl-frame {
+          position: relative;
+          outline: 1px solid transparent;
+          outline-offset: 0;
+          transition: outline-color 160ms var(--ease, ease);
+        }
+        .tl-frame:focus-within {
+          outline-color: rgba(217,249,157,0.7);
+        }
+
         .tl-tooltip {
           position: absolute;
           background: rgba(10,10,11,0.96);

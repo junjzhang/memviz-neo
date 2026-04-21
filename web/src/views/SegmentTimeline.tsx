@@ -274,20 +274,20 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
         return plotLeft + ((x - vMinN) / span) * plotW;
       };
 
-      // Hover range — faint green column spanning all rows, with dashed
-      // verticals at alloc_us / free_us. Matches PhaseTimeline's styling
-      // so the same alloc reads identically across the two plots.
-      const h = hoverRef.current;
-      if (h) {
-        const freeUs = h.alloc.free_us < 0 ? data.time_max : h.alloc.free_us;
-        const rx1 = Math.max(usToPx(h.alloc.alloc_us), plotLeft);
+      // Range highlight: hover > click-selection. Same accent color as
+      // PhaseTimeline so one alloc reads identically in both plots.
+      const hoveredAlloc = hoverRef.current?.alloc ?? null;
+      const rangeAlloc = hoveredAlloc ?? highlight?.alloc ?? null;
+      if (rangeAlloc) {
+        const freeUs = rangeAlloc.free_us < 0 ? data.time_max : rangeAlloc.free_us;
+        const rx1 = Math.max(usToPx(rangeAlloc.alloc_us), plotLeft);
         const rx2 = Math.min(usToPx(freeUs), plotLeft + plotW);
         if (rx2 > rx1) {
           const yTop = TOP_PAD;
           const yBot = height - BOTTOM_PAD;
-          ctx.fillStyle = "rgba(217,249,157,0.05)";
+          ctx.fillStyle = "rgba(217,249,157,0.08)";
           ctx.fillRect(rx1, yTop, rx2 - rx1, yBot - yTop);
-          ctx.strokeStyle = "rgba(217,249,157,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = "rgba(217,249,157,0.55)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
           ctx.beginPath();
           if (rx1 > plotLeft) { ctx.moveTo(rx1, yTop); ctx.lineTo(rx1, yBot); }
           if (rx2 < plotLeft + plotW) { ctx.moveTo(rx2, yTop); ctx.lineTo(rx2, yBot); }
@@ -443,7 +443,9 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
       />
       <canvas
         ref={canvasRef}
+        className="tl-canvas"
         style={{ position: "relative", background: "transparent", cursor: "pointer" }}
+        tabIndex={0}
         onClick={handleClick}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
