@@ -1,0 +1,8 @@
+{
+  "name": "memviz-bench",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

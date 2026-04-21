@@ -55,6 +55,32 @@ Clone [C-J-Cundy/desktop_memory_viz][cj] and set `DMV_DIR` to its path
 node bench/desktop.mjs
 ```
 
+## render.mjs
+
+End-to-end parse + memory + FPS probe. Boots a local static server on
+`web/dist`, drives headless Chromium through the actual user path
+(pick file → wait for dashboard), and reports:
+
+- `T_parse` — pickle bytes → summary in the store (WASM parse +
+  worker round-trip)
+- `T_render` — summary → first timeline canvas painted (layout worker
+  O(N²) + React mount + WebGL2 init)
+- JS heap + total UA memory (needs COOP/COEP; the bench serves the
+  right headers itself)
+- FPS p50/p95 for idle / pan `d` / zoom `w` gestures
+
+Headless chromium has no real GPU, so FPS measurements under `--headless`
+(the default) fall back to SwiftShader and the numbers aren't
+reproducible across machines. Pass `--headed` to open a visible window
+and let the real GPU drive; the memory + parse numbers are reliable in
+either mode.
+
+```bash
+cd web && pnpm build                   # bench loads from web/dist
+node bench/render.mjs                  # headless, parse + memory only
+node bench/render.mjs --headed         # adds FPS probes (real GPU)
+```
+
 ## Indicative numbers
 
 Measured on a 2-socket Intel laptop under Node v25 / Chrome v142,
@@ -116,6 +142,24 @@ pan/zoom via two uniform updates per frame, so 50 k+ allocations stay
 at 60 fps. [desktop_memory_viz][cj] was built specifically because the
 pytorch viewer "crashes on large (~1 GB+) snapshot files" (quote from
 their README).
+
+Measured end-to-end via `bench/render.mjs --headed` on one machine
+(Framework laptop, Intel iGPU, 120 Hz display, ~18 k allocs in the view
+on the sample pickle):
+
+| Stage           | Time / FPS |
+| --------------- | ---------- |
+| `T_parse`       | ~1200 ms (pickle → summary in store) |
+| `T_render`      | ~2100 ms (layout worker O(N²) + React mount + WebGL2 init) |
+| JS heap used    | ~420 MiB   |
+| Total UA memory | ~555 MiB   |
+| Idle FPS        | 120 fps · frame p95 = 8.3 ms |
+| Pan 'd' 5 s     | 120 fps · frame p95 = 8.3 ms |
+| Zoom 'w' 3 s    | 120 fps · frame p95 = 8.3 ms |
+
+Frame budget on a 120 Hz display is 8.3 ms — all three gestures hit it
+with no p95 spike. On a 60 Hz display the app caps at 60 fps but p95
+stays well under the 16.7 ms budget.
 
 [pv]: https://docs.pytorch.org/memory_viz
 [mv]: https://github.com/pytorch/pytorch/blob/main/torch/utils/viz/MemoryViz.js

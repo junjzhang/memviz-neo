@@ -1,8 +1,7 @@
 <div align="center">
 
-# memviz/neo
+<img src="./docs/title.svg" alt="memviz/neo — high-performance, browser-native, multi-rank PyTorch GPU memory snapshot viewer" width="760"/>
 
-**High-performance, browser-native, multi-rank PyTorch GPU memory snapshot viewer.**
 Drop `rank*.pickle`s into the page — everything parses, computes and renders
 locally. No backend, no upload, no waiting on someone else's server.
 

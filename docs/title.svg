@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 200" width="900" height="200" role="img" aria-label="memviz/neo">
+  <rect width="900" height="200" fill="#0a0a0b"/>
+  <text x="450" y="110"
+        font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, system-ui, sans-serif"
+        font-size="88" font-weight="900"
+        text-anchor="middle"
+        letter-spacing="-3">
+    <tspan fill="#fafafa">memviz</tspan><tspan fill="#fafafa">/</tspan><tspan fill="#d9f99d">neo</tspan>
+  </text>
+  <text x="450" y="158"
+        font-family="ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, monospace"
+        font-size="13" font-weight="500"
+        text-anchor="middle"
+        fill="#a3a3a3"
+        letter-spacing="5">HIGH-PERFORMANCE · BROWSER-NATIVE · MULTI-RANK</text>
+</svg>
