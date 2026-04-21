@@ -147,9 +147,11 @@ First-time setup: **Settings → Pages → Source: GitHub Actions**.
 
 ## Roadmap
 
-- [ ] **Multi-rank diff + insights** — side-by-side comparison across ranks of the same run, auto-surfaced observations (peak skew, allocator stalls, leak suspects concentrated on one rank).
-- [ ] **Agent-friendly interface** — headless CLI + exposed parser/analysis primitives so code agents can consume snapshots via scripted calls and skill invocations, not just the browser UI.
-- [ ] **Better anomaly detection** — beyond pending-free + large-long-lived: fragmentation patterns, cross-rank outliers, allocator misconfiguration heuristics.
+Tracked in [#5](https://github.com/junjzhang/memviz-neo/issues/5).
+
+- [ ] [**Multi-rank diff + insights**](https://github.com/junjzhang/memviz-neo/issues/2) — side-by-side comparison across ranks of the same run, auto-surfaced observations (peak skew, allocator stalls, leak suspects concentrated on one rank).
+- [ ] [**Agent-friendly interface**](https://github.com/junjzhang/memviz-neo/issues/3) — headless CLI + exposed parser/analysis primitives so code agents can consume snapshots via scripted calls and skill invocations, not just the browser UI.
+- [ ] [**Better anomaly detection**](https://github.com/junjzhang/memviz-neo/issues/4) — beyond pending-free + large-long-lived: fragmentation patterns, cross-rank outliers, allocator misconfiguration heuristics.
 
 ## Acknowledgements
 
