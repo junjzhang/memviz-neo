@@ -1179,29 +1179,22 @@ export default function PhaseTimeline({
           border-bottom-width: 2px;
           letter-spacing: 0.04em;
         }
-        .tl-detail {
-          margin-top: 16px;
-          background: var(--bg-elev);
-          border: 1px solid var(--border);
-          border-left: 2px solid var(--accent);
-          padding: 20px 24px;
-          max-height: 320px;
-          overflow: auto;
-        }
         .tl-detail-head {
           display: flex;
-          gap: var(--s7);
-          margin-bottom: 16px;
-          padding-bottom: 14px;
+          gap: var(--s6);
+          padding-bottom: 8px;
+          margin-bottom: 8px;
           border-bottom: 1px solid var(--divider);
+          align-items: flex-end;
+          flex-wrap: wrap;
         }
         .tl-detail-trace {
           font-size: 11px;
-          line-height: 1.7;
+          line-height: 1.55;
         }
         .tl-stack-frame {
           color: var(--fg-dim);
-          padding: 1px 0;
+          padding: 0;
         }
         .tl-stack-frame[data-py="1"] { color: var(--fg-muted); }
         .tl-stack-frame[data-py="1"] .tl-stack-loc { color: var(--accent); opacity: 0.8; }
