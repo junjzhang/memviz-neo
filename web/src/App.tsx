@@ -73,16 +73,9 @@ function Empty({ label = "No data" }: { label?: string }) {
   );
 }
 
-// Isolated subscriber: RankSidebar re-renders on every progressive rank
-// flush, but the rest of the dashboard shouldn't.
-function RankSidebarSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
-  const allRanks = useFileStore((s) => s.ranks);
-  return <RankSidebar allRanks={allRanks} onSelectRank={onSelectRank} />;
-}
-
 function Dashboard() {
   // These selectors change on rank switch only, not on progressive load
-  // flushes (ranks + completedCount live in RankSidebarSection).
+  // flushes (ranks + completedCount are subscribed inside RankSidebar).
   const flame = useDataStore((s) => s.flame);
   const framePool = useDataStore((s) => s.framePool);
   const topAllocations = useDataStore((s) => s.topAllocations);
@@ -119,18 +112,14 @@ function Dashboard() {
   const MIN_PHASE = 200;
   const MIN_SEGMENT = 80;
   const [phaseRatio, setPhaseRatio] = useState<number>(() => {
-    if (typeof window === "undefined") return 0.78;
-    const raw = localStorage.getItem("phase-ratio");
-    if (raw == null) return 0.78;
-    const n = parseFloat(raw);
-    return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.78;
+    const n = parseFloat(localStorage.getItem("phase-ratio") || "");
+    return n > 0 && n < 1 ? n : 0.78;
   });
-  const phaseTarget = Math.round(availableH * phaseRatio);
   const tlHeight = Math.max(
     MIN_PHASE,
-    Math.min(availableH - MIN_SEGMENT, phaseTarget),
+    Math.min(availableH - MIN_SEGMENT, Math.round(availableH * phaseRatio)),
   );
-  const segSlotHeight = Math.max(MIN_SEGMENT, availableH - tlHeight);
+  const segSlotHeight = availableH - tlHeight;
 
   useEffect(() => {
     localStorage.setItem("phase-ratio", phaseRatio.toFixed(3));
@@ -229,7 +218,7 @@ function Dashboard() {
   return (
     <Layout>
       <div className="dashboard">
-        <RankSidebarSection onSelectRank={selectRank} />
+        <RankSidebar onSelectRank={selectRank} />
         <div className="dashboard-main">
           {error && <div className="dashboard-error mono">! {error}</div>}
           <div ref={tlRef} className="track timeline-track">

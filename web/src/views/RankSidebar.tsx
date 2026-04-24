@@ -5,11 +5,11 @@ import { useFileStore } from "../stores/fileStore";
 import { useDataStore } from "../stores/dataStore";
 
 interface Props {
-  allRanks: number[];
   onSelectRank: (rank: number) => void;
 }
 
-export default function RankSidebar({ allRanks, onSelectRank }: Props) {
+export default function RankSidebar({ onSelectRank }: Props) {
+  const allRanks = useFileStore((s) => s.ranks);
   const currentRank = useDataStore((s) => s.currentRank);
   const completedCount = useFileStore((s) => s.completedCount);
   const totalCount = useFileStore((s) => s.totalCount);
