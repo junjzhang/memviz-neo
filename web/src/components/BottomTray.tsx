@@ -249,12 +249,12 @@ export default function BottomTray({
           border-bottom-color: var(--accent);
         }
         .tray-tab-badge {
-          font-size: 10px;
+          font-size: 9px;
           color: var(--fg-faint);
-          background: var(--bg-elev-2);
-          padding: 1px 6px;
+          padding: 0;
           font-variant-numeric: tabular-nums;
           letter-spacing: 0;
+          opacity: 0.7;
         }
         .tray-tab.is-active .tray-tab-badge { color: var(--fg-muted); }
         .tray-collapse {
