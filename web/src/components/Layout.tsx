@@ -23,7 +23,15 @@ export default function Layout({ children }: { children: ReactNode }) {
   const util = reserved > 0 ? ((peak / reserved) * 100).toFixed(0) : "—";
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
+    <div
+      style={{
+        height: "100vh",
+        background: "var(--bg)",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
       <header className="app-header">
         <div className="app-header-left">
           <button
@@ -125,7 +133,14 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
       </header>
 
-      <main>
+      <main
+        style={{
+          flex: "1 1 auto",
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
         {loading ? (
           <div
             style={{

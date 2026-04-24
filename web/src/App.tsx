@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfigProvider, theme } from "antd";
 import Layout from "./components/Layout";
 import FileSelector from "./components/FileSelector";
+import BottomTray, { type TrayTab } from "./components/BottomTray";
 import PhaseTimeline from "./views/PhaseTimeline";
 import MemoryFlamegraph from "./views/MemoryFlamegraph";
 import TopAllocations from "./views/TopAllocations";
-import MultiRank from "./views/MultiRank";
+import RankSidebar from "./views/RankSidebar";
 import AnomalyPanel from "./views/AnomalyPanel";
 import SegmentTimeline from "./views/SegmentTimeline";
-import { TimelineHints, TimelineDetailPanel } from "./views/TimelineDetail";
+import { ShortcutsHint, TimelineDetailPanel } from "./views/TimelineDetail";
 import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
 import { useRankSummaries } from "./stores/rankStore";
-import { useContainerWidth, useViewportHeight } from "./hooks/useContainerWidth";
+import { useContainerSize } from "./hooks/useContainerWidth";
 
 export default function App() {
   const fileStatus = useFileStore((s) => s.status);
@@ -54,42 +55,6 @@ export default function App() {
   );
 }
 
-function Section({
-  eyebrow,
-  title,
-  meta,
-  children,
-}: {
-  eyebrow?: string;
-  title: string;
-  meta?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="section">
-      <div className="section-head">
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          {eyebrow && (
-            <span
-              className="mono"
-              style={{
-                fontSize: 10,
-                color: "var(--fg-dim)",
-                letterSpacing: "0.14em",
-              }}
-            >
-              {eyebrow}
-            </span>
-          )}
-          <h2 className="section-title">{title}</h2>
-        </div>
-        {meta && <div className="section-meta">{meta}</div>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
 function Empty({ label = "No data" }: { label?: string }) {
   return (
     <div
@@ -108,51 +73,16 @@ function Empty({ label = "No data" }: { label?: string }) {
   );
 }
 
-// Isolated subscriber: MultiRank re-renders on every progressive rank
+// Isolated subscriber: RankSidebar re-renders on every progressive rank
 // flush, but the rest of the dashboard shouldn't.
-function MultiRankSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
-  const currentRank = useDataStore((s) => s.currentRank);
+function RankSidebarSection({ onSelectRank }: { onSelectRank: (r: number) => void }) {
   const allRanks = useFileStore((s) => s.ranks);
-  const completedCount = useFileStore((s) => s.completedCount);
-  const totalCount = useFileStore((s) => s.totalCount);
-  const stillLoading = completedCount < totalCount;
-
-  return (
-    <Section
-      eyebrow="01"
-      title="Multi-Rank Overview"
-      meta={
-        stillLoading ? (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: "var(--accent)",
-                animation: "fs-pulse 1.1s ease-in-out infinite",
-              }}
-            />
-            <span className="mono hl">{completedCount}</span>
-            <span className="faint">/ {totalCount} loading</span>
-          </span>
-        ) : (
-          `${allRanks.length} ranks`
-        )
-      }
-    >
-      <MultiRank
-        allRanks={allRanks}
-        currentRank={currentRank}
-        onSelectRank={onSelectRank}
-      />
-    </Section>
-  );
+  return <RankSidebar allRanks={allRanks} onSelectRank={onSelectRank} />;
 }
 
 function Dashboard() {
   // These selectors change on rank switch only, not on progressive load
-  // flushes (ranks + completedCount live in MultiRankSection).
+  // flushes (ranks + completedCount live in RankSidebarSection).
   const flame = useDataStore((s) => s.flame);
   const framePool = useDataStore((s) => s.framePool);
   const topAllocations = useDataStore((s) => s.topAllocations);
@@ -165,21 +95,85 @@ function Dashboard() {
   const currentRank = useDataStore((s) => s.currentRank);
   const error = useDataStore((s) => s.error);
   const setCurrentRank = useDataStore((s) => s.setCurrentRank);
+  const selectedAlloc = useDataStore((s) => s.selectedAlloc);
+  // Stable key the tray watches to auto-expand on selection. (addr,
+  // alloc_us) identifies a unique alloc — picking a new one re-fires.
+  const trayTrigger = selectedAlloc
+    ? `${selectedAlloc.addr}-${selectedAlloc.alloc_us}`
+    : null;
 
   const selectRank = useCallback(
     (r: number) => { void setCurrentRank(r); },
     [setCurrentRank],
   );
 
-  const [tlRef, tlWidth] = useContainerWidth();
-  const [flameRef, flameWidth] = useContainerWidth();
+  // Box model: box contentH = Phase + Divider + Segment slot + chrome.
+  // Phase and Segment slot share the available space; the divider
+  // slides the split between them. Segment slot is height-capped — if
+  // SegmentTimeline's natural canvas exceeds the slot, it scrolls
+  // inside the slot (the box itself only scrolls when the tray is
+  // expanded, via tl-tray-spacer).
+  const [tlRef, tlWidth, trackH] = useContainerSize();
+  const CHROME = 46; // track-head(~30) + tl-frame padding-top(8) + divider(8)
+  const availableH = Math.max(300, Math.round(trackH - CHROME));
+  const MIN_PHASE = 200;
+  const MIN_SEGMENT = 80;
+  const [phaseRatio, setPhaseRatio] = useState<number>(() => {
+    if (typeof window === "undefined") return 0.78;
+    const raw = localStorage.getItem("phase-ratio");
+    if (raw == null) return 0.78;
+    const n = parseFloat(raw);
+    return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.78;
+  });
+  const phaseTarget = Math.round(availableH * phaseRatio);
+  const tlHeight = Math.max(
+    MIN_PHASE,
+    Math.min(availableH - MIN_SEGMENT, phaseTarget),
+  );
+  const segSlotHeight = Math.max(MIN_SEGMENT, availableH - tlHeight);
+
+  useEffect(() => {
+    localStorage.setItem("phase-ratio", phaseRatio.toFixed(3));
+  }, [phaseRatio]);
+
+  const handleDividerMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = tlHeight;
+      const available = availableH;
+      const onMove = (ev: MouseEvent) => {
+        const next = Math.max(
+          MIN_PHASE,
+          Math.min(available - MIN_SEGMENT, startH + (ev.clientY - startY)),
+        );
+        setPhaseRatio(next / available);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "ns-resize";
+      document.body.style.userSelect = "none";
+    },
+    [tlHeight, availableH],
+  );
+
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
-  const tlHeight = useViewportHeight(480, 500);
 
   // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
   // read/write every frame so they follow each other without re-renders.
   // Units track xAxisMode: μs in time mode, event index in event mode.
   const viewRangeRef = useRef<[number, number]>([0, 1]);
+  if (import.meta.env.DEV) {
+    const w = window as unknown as { __viewRange: unknown; __store: unknown };
+    w.__viewRange = viewRangeRef;
+    w.__store = useDataStore;
+  }
   useEffect(() => {
     if (!timeline) return;
     if (xAxisMode === "event") {
@@ -190,50 +184,72 @@ function Dashboard() {
     }
   }, [timeline?.time_min, timeline?.time_max, xAxisMode, eventTimes]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const tabs = useMemo<TrayTab[]>(() => {
+    const list: TrayTab[] = [
+      {
+        id: "details",
+        label: "Details",
+        render: () => (
+          <div className="tray-pad">
+            <TimelineDetailPanel />
+          </div>
+        ),
+      },
+      {
+        id: "flame",
+        label: "Flamegraph",
+        render: () => <FlameTab flame={flame} framePool={framePool} />,
+      },
+      {
+        id: "top",
+        label: "Top Allocs",
+        badge: topAllocations.length || undefined,
+        render: () => (
+          <div className="tray-pad">
+            <TopAllocations data={topAllocations} />
+          </div>
+        ),
+      },
+    ];
+    if (anomalies.length > 0) {
+      list.push({
+        id: "anomalies",
+        label: "Anomalies",
+        badge: anomalies.length,
+        render: () => (
+          <div className="tray-pad">
+            <AnomalyPanel anomalies={anomalies} />
+          </div>
+        ),
+      });
+    }
+    return list;
+  }, [flame, framePool, topAllocations, anomalies]);
+
   return (
     <Layout>
-      <div className="page">
-        {error && (
-          <div
-            className="mono"
-            style={{
-              color: "var(--red)",
-              padding: "12px 16px",
-              border: "1px solid #7f1d1d",
-              background: "rgba(248,113,113,0.05)",
-              marginBottom: 24,
-              fontSize: 12,
-            }}
-          >
-            ! {error}
-          </div>
-        )}
-
-        <MultiRankSection onSelectRank={selectRank} />
-
-        <div ref={tlRef}>
-          <Section
-            eyebrow="02"
-            title="Memory Timeline"
-            meta={
-              <>
-                <span className="mono hl">{rankTag}</span>
-                <span className="mono faint" style={{ marginLeft: 12 }}>
-                  {timelineAllocs.length} allocs
-                </span>
+      <div className="dashboard">
+        <RankSidebarSection onSelectRank={selectRank} />
+        <div className="dashboard-main">
+          {error && <div className="dashboard-error mono">! {error}</div>}
+          <div ref={tlRef} className="track timeline-track">
+            <div className="track-head mono">
+              <span className="eyebrow">Memory Timeline</span>
+              <span className="track-head-right">
+                <span className="hl">{rankTag}</span>
+                <span className="faint"> · {timelineAllocs.length} allocs</span>
                 {segmentRows.length > 0 && (
-                  <span className="mono faint" style={{ marginLeft: 12 }}>
-                    · {segmentRows.length} segments
-                  </span>
+                  <span className="faint"> · {segmentRows.length} segments</span>
                 )}
-              </>
-            }
-          >
-            {timeline && tlWidth > 0 ? (
-              <>
-                {/* One focus frame around both plots — either canvas
-                    focused highlights the whole region as a single unit. */}
-                <div className="tl-frame">
+                <ShortcutsHint />
+              </span>
+            </div>
+            <div className="tl-frame">
+              <div
+                className="tl-phase-slot"
+                style={{ height: tlHeight }}
+              >
+                {timeline && tlWidth > 0 ? (
                   <PhaseTimeline
                     data={timeline}
                     allocs={timelineAllocs}
@@ -243,75 +259,62 @@ function Dashboard() {
                     currentRank={currentRank}
                     viewRangeRef={viewRangeRef}
                   />
-                  {segmentRows.length > 0 && (
-                    <div
-                      style={{
-                        borderTop: "1px dashed var(--divider)",
-                      }}
-                    >
-                      <SegmentTimeline
-                        data={timeline}
-                        rows={segmentRows}
-                        width={tlWidth}
-                        viewRangeRef={viewRangeRef}
-                        mode={xAxisMode}
-                        eventTimes={eventTimes}
-                      />
-                    </div>
-                  )}
-                </div>
-                <TimelineHints />
-                <TimelineDetailPanel />
-              </>
-            ) : (
-              <Empty />
-            )}
-          </Section>
+                ) : (
+                  <Empty />
+                )}
+              </div>
+              {segmentRows.length > 0 && timeline && tlWidth > 0 && (
+                <>
+                  <div
+                    className="tl-divider"
+                    onMouseDown={handleDividerMouseDown}
+                    title="Drag to resize memory / segment split"
+                  />
+                  <div
+                    className="tl-segment-slot"
+                    style={{ height: segSlotHeight }}
+                  >
+                    <SegmentTimeline
+                      data={timeline}
+                      rows={segmentRows}
+                      width={tlWidth}
+                      height={segSlotHeight}
+                      viewRangeRef={viewRangeRef}
+                      mode={xAxisMode}
+                      eventTimes={eventTimes}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            {/* Spacer grows with tray height so timeline-track overflows
+                and becomes scrollable — lets users pull timeline content
+                out from under the floating tray. Shrinks to 0 when the
+                tray is collapsed so no scroll appears at rest. */}
+            <div className="tl-tray-spacer" />
+          </div>
+          <BottomTray
+            tabs={tabs}
+            defaultActiveId="details"
+            expandTrigger={trayTrigger}
+            expandActiveId="details"
+          />
         </div>
-
-        {anomalies.length > 0 && (
-          <Section
-            eyebrow="03"
-            title="Anomalies"
-            meta={
-              <span className="mono" style={{ color: "var(--red)" }}>
-                {anomalies.length} detected
-              </span>
-            }
-          >
-            <AnomalyPanel anomalies={anomalies} />
-          </Section>
-        )}
-
-        <div ref={flameRef} style={{ marginBottom: 56 }}>
-          <Section
-            eyebrow="04"
-            title="Memory Flame Graph"
-            meta={
-              <span
-                className="section-meta mono faint"
-                title="bytes × lifetime contributed by allocations passing through each frame"
-              >
-                pressure by call stack
-              </span>
-            }
-          >
-            {flame && flame.totalWeight > 0 && flameWidth > 0 ? (
-              <MemoryFlamegraph flame={flame} framePool={framePool} width={flameWidth} height={450} />
-            ) : (
-              <Empty />
-            )}
-          </Section>
-        </div>
-
-        <Section
-          eyebrow="05"
-          title="Top Allocations"
-          meta={<span className="mono hl">{rankTag}</span>}
-        >
-          <TopAllocations data={topAllocations} />
-        </Section>
       </div>
     </Layout>
+  );
+}
+
+function FlameTab({ flame, framePool }: { flame: Parameters<typeof MemoryFlamegraph>[0]["flame"] | null; framePool: Parameters<typeof MemoryFlamegraph>[0]["framePool"] }) {
+  const [ref, w, h] = useContainerSize();
+  const ready = flame && flame.totalWeight > 0 && w > 0 && h > 0;
+  return (
+    <div ref={ref} className="flame-tab">
+      {ready ? (
+        <MemoryFlamegraph flame={flame} framePool={framePool} width={w} height={h} />
+      ) : (
+        <Empty />
+      )}
+    </div>
   );
 }

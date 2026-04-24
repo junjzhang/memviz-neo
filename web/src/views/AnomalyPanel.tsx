@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { useState } from "react";
 import type { Anomaly } from "../compute";
 import { useDataStore } from "../stores/dataStore";
 import { formatBytes, formatTopFrame } from "../utils";
@@ -20,7 +20,6 @@ export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
   const focusAnomaly = useDataStore((s) => s.focusAnomaly);
   const focusedAddr = useDataStore((s) => s.focusedAddr);
   const framePool = useDataStore((s) => s.framePool);
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [filter, setFilter] = useState<"all" | "pending_free" | "leak">("all");
 
@@ -76,77 +75,56 @@ export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
         <table className="dtable">
           <thead>
             <tr>
-              <th style={{ width: 140 }}>Type</th>
-              <th style={{ width: 110 }}>Size</th>
-              <th style={{ width: 160 }}>Info</th>
-              <th>Source</th>
+              <th style={{ width: 120 }}>Type</th>
+              <th style={{ width: 90 }}>Size</th>
+              <th style={{ width: 260 }}>Source</th>
+              <th>Detail</th>
             </tr>
           </thead>
           <tbody>
             {pageData.map((a) => {
               const key = `${a.addr}-${a.alloc_us}`;
               const isSelected = focusedAddr === a.addr;
-              const isExpanded = expanded === key;
               return (
-                <Fragment key={key}>
-                  <tr
-                    className={isSelected ? "is-selected" : ""}
-                    style={{ cursor: "pointer" }}
-                    onClick={() => {
-                      focusAnomaly(a);
-                      setExpanded(isExpanded ? null : key);
+                <tr
+                  key={key}
+                  className={isSelected ? "is-selected" : ""}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => focusAnomaly(a)}
+                >
+                  <td>
+                    <span className={TYPE_CHIP[a.type] || "chip"}>
+                      {TYPE_LABELS[a.type] || a.type}
+                    </span>
+                  </td>
+                  <td className="mono" style={{ color: "var(--fg)" }}>
+                    {formatBytes(a.size)}
+                  </td>
+                  <td
+                    className="mono"
+                    style={{
+                      fontSize: 11,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: 0,
+                    }}
+                    title={formatTopFrame(a.top_frame_idx, framePool) || "?"}
+                  >
+                    {formatTopFrame(a.top_frame_idx, framePool) || "?"}
+                  </td>
+                  <td
+                    className="mono faint"
+                    style={{
+                      fontSize: 11,
+                      whiteSpace: "normal",
+                      lineHeight: 1.5,
+                      color: "var(--fg-muted)",
                     }}
                   >
-                    <td>
-                      <span className={TYPE_CHIP[a.type] || "chip"}>
-                        {TYPE_LABELS[a.type] || a.type}
-                      </span>
-                    </td>
-                    <td className="mono" style={{ color: "var(--fg)" }}>
-                      {formatBytes(a.size)}
-                    </td>
-                    <td className="mono faint" style={{ fontSize: 11 }}>
-                      {a.label}
-                    </td>
-                    <td
-                      className="mono"
-                      style={{
-                        fontSize: 11,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        maxWidth: 0,
-                      }}
-                    >
-                      {formatTopFrame(a.top_frame_idx, framePool) || "?"}
-                    </td>
-                  </tr>
-                  {isExpanded && a.detail && (
-                    <tr>
-                      <td
-                        colSpan={4}
-                        style={{
-                          background: "var(--bg)",
-                          padding: "12px 16px",
-                          borderBottom: "1px solid var(--border)",
-                        }}
-                      >
-                        <pre
-                          className="mono"
-                          style={{
-                            fontSize: 11,
-                            color: "var(--fg-muted)",
-                            margin: 0,
-                            whiteSpace: "pre-wrap",
-                            lineHeight: 1.6,
-                          }}
-                        >
-                          {a.detail}
-                        </pre>
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
+                    {a.detail || a.label}
+                  </td>
+                </tr>
               );
             })}
           </tbody>

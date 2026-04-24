@@ -125,7 +125,18 @@ export default function PhaseTimeline({
     if (!focusRange) return;
     cancelAnimationFrame(animRef.current);
     const from: [number, number] = [...viewRangeRef.current];
-    const to = focusRange;
+    // focusRange lives in μs (the anomaly's alloc/free wall-clock). In
+    // event mode viewRangeRef holds event indices, so convert before
+    // easing or the animation lands at garbage coordinates.
+    const mode = useDataStore.getState().xAxisMode;
+    const evt = useDataStore.getState().eventTimes;
+    const to: [number, number] =
+      mode === "event" && evt && evt.length > 0
+        ? [
+            eventIdxAt(evt, focusRange[0] - data.time_min),
+            eventIdxAt(evt, focusRange[1] - data.time_min),
+          ]
+        : focusRange;
     const start = performance.now();
     const duration = 350;
     function tick(now: number) {
@@ -136,7 +147,6 @@ export default function PhaseTimeline({
       if (t < 1) animRef.current = requestAnimationFrame(tick);
     }
     animRef.current = requestAnimationFrame(tick);
-    canvasRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     return () => cancelAnimationFrame(animRef.current);
     // viewRangeRef + invalidate are imperative (ref + render-loop ping);
     // re-running this effect on their identity would cancel the in-flight

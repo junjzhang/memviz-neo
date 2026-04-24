@@ -185,9 +185,22 @@ export const useDataStore = create<DataState>((set, get) => ({
   },
 
   focusAnomaly: (anomaly: Anomaly) => {
-    const padding = Math.max(100000, (anomaly.free_us > 0 ? anomaly.free_us - anomaly.alloc_us : 1000000) * 0.3);
-    const tMin = anomaly.alloc_us - padding;
-    const tMax = (anomaly.free_us > 0 ? anomaly.free_us : anomaly.alloc_us + padding * 2) + padding;
+    // Symmetric window centered on the alloc: for pending_free we span
+    // [alloc, free] with 20% padding on each side; for leak/alive we
+    // pick a ±half-window around alloc. Previously tMax leaked alloc +
+    // 3×padding which pushed the alloc to the far-left 25% of the
+    // window — visually felt like "jumping far away" in event mode.
+    let tMin: number, tMax: number;
+    if (anomaly.free_us > 0) {
+      const span = anomaly.free_us - anomaly.alloc_us;
+      const pad = Math.max(100000, span * 0.2);
+      tMin = anomaly.alloc_us - pad;
+      tMax = anomaly.free_us + pad;
+    } else {
+      const half = 500000; // 500ms half-window
+      tMin = anomaly.alloc_us - half;
+      tMax = anomaly.alloc_us + half;
+    }
     set({ focusedAddr: anomaly.addr, focusRange: [tMin, tMax] });
   },
 

@@ -8,38 +8,31 @@ import { useDataStore } from "../stores/dataStore";
 import type { AllocationDetail } from "../types/timeline";
 import { formatBytes, isInternalFrame } from "../utils";
 
-export function TimelineHints() {
-  return (
-    <div className="tl-hint mono">
-      <Kbd>WASD</Kbd>
-      <span>pan/zoom X</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>⇧WASD</Kbd>
-      <span>pan/zoom Y</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>R</Kbd><span>+drag</span>
-      <span>mem ruler</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>T</Kbd><span>+drag</span>
-      <span>time ruler</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>drag</Kbd>
-      <span>zoom to box</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>dblclick</Kbd>
-      <span>reset</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>Esc</Kbd>
-      <span>clear</span>
-      <span className="tl-hint-sep">·</span>
-      <Kbd>⌘C</Kbd>
-      <span>copy trace</span>
-    </div>
-  );
-}
+const SHORTCUTS: [string, string][] = [
+  ["WASD", "pan/zoom X"],
+  ["⇧WASD", "pan/zoom Y"],
+  ["R + drag", "mem ruler"],
+  ["T + drag", "time ruler"],
+  ["drag", "zoom to box"],
+  ["dblclick", "reset"],
+  ["Esc", "clear"],
+  ["⌘C", "copy trace"],
+];
 
-function Kbd({ children }: { children: React.ReactNode }) {
-  return <kbd className="tl-kbd">{children}</kbd>;
+export function ShortcutsHint() {
+  return (
+    <span className="tl-shortcuts">
+      <span className="tl-shortcuts-toggle mono">? shortcuts</span>
+      <div className="tl-shortcuts-popover">
+        {SHORTCUTS.map(([k, v]) => (
+          <div key={k} className="tl-shortcuts-row">
+            <kbd className="tl-kbd">{k}</kbd>
+            <span>{v}</span>
+          </div>
+        ))}
+      </div>
+    </span>
+  );
 }
 
 export function TimelineDetailPanel() {
@@ -78,7 +71,13 @@ export function TimelineDetailPanel() {
     return () => window.removeEventListener("keydown", onCopy);
   }, [detail]);
 
-  if (!detail) return null;
+  if (!detail) {
+    return (
+      <div className="tl-detail-empty mono faint">
+        click an allocation in the timeline to see its details
+      </div>
+    );
+  }
 
   const seg = (() => {
     for (const s of segments) {

@@ -10,6 +10,10 @@ interface Props {
   data: TimelineData;
   rows: SegmentRow[];
   width: number;
+  /** Slot height: canvas fills exactly this many pixels. Row heights
+   *  scale with it (Phase/Segment divider recomputes). When 0/omitted,
+   *  falls back to the natural layout. */
+  height?: number;
   /** Shared with PhaseTimeline so pan/zoom stays in lockstep. */
   viewRangeRef: React.MutableRefObject<[number, number]>;
   /** "time" = μs axis; "event" = alloc/free-event ordinal axis. */
@@ -48,7 +52,7 @@ import {
  * Time axis is read from `viewRangeRef` which is shared with
  * PhaseTimeline — panning / zooming either view moves both.
  */
-export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode, eventTimes }: Props) {
+export default function SegmentTimeline({ data, rows, width, height: slotHeight, viewRangeRef, mode, eventTimes }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const glCanvasRef = useRef<HTMLCanvasElement>(null);
   const glRef = useRef<GLState | null>(null);
@@ -74,22 +78,35 @@ export default function SegmentTimeline({ data, rows, width, viewRangeRef, mode,
     return null;
   }, [selectedAlloc, rows]);
 
-  // Per-row vertical layout. The selected row (if any) expands so the
-  // user can read small allocs inside it; other rows stay compact.
-  // Precomputed once per render so hit-test + draw + stripPack share
-  // exactly the same Y layout.
+  // Per-row vertical layout. Focused row takes 4× the weight of a
+  // compact row so small allocs inside it stay readable. When the slot
+  // sets an explicit height, we scale rows to fill it; otherwise the
+  // natural ROW_H layout applies (and the slot scrolls if shorter).
   const rowLayout = useMemo(() => {
     const focusedIdx = highlight?.rowIdx ?? -1;
+    const focusWeight = 4;
+    const weightSum =
+      rows.length + (focusedIdx >= 0 ? focusWeight - 1 : 0);
+    // Natural fall-back height (when slotHeight is 0 or too small to
+    // give normal rows at least MIN_ROW_PX).
+    const MIN_ROW_PX = 18;
+    const naturalH = TOP_PAD + BOTTOM_PAD + rows.length * ROW_H
+      + (focusedIdx >= 0 ? ROW_H_FOCUSED - ROW_H : 0);
+    const usable = (slotHeight && slotHeight > 0 ? slotHeight : naturalH)
+      - TOP_PAD - BOTTOM_PAD;
+    // One weight unit = pixels available to a normal row. Clamp so small
+    // slots don't collapse rows below a legible minimum.
+    const unit = Math.max(MIN_ROW_PX, usable / Math.max(1, weightSum));
     const yTop = new Float32Array(rows.length);
     const yH = new Float32Array(rows.length);
     let y = TOP_PAD;
     for (let ri = 0; ri < rows.length; ri++) {
       yTop[ri] = y;
-      yH[ri] = ri === focusedIdx ? ROW_H_FOCUSED : ROW_H;
+      yH[ri] = ri === focusedIdx ? unit * focusWeight : unit;
       y += yH[ri];
     }
     return { yTop, yH, canvasH: y + BOTTOM_PAD };
-  }, [rows, highlight?.rowIdx]);
+  }, [rows, highlight?.rowIdx, slotHeight]);
   const height = rowLayout.canvasH;
 
   // Build the WebGL instance buffer once per data/size change. Each alloc

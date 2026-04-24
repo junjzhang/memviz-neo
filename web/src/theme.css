@@ -103,6 +103,163 @@ button { font-family: inherit; }
   padding: var(--s7) var(--s6) var(--s9);
 }
 
+/* IDE-style shell: RankSidebar (left, collapsible) + main column
+   (timeline on top, BottomTray pinned to bottom). Heights cascade
+   from Layout's viewport-bound flex chain so the timeline canvas
+   expands as tray/sidebar resize. */
+.dashboard {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+.dashboard-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+.dashboard-error {
+  color: var(--red);
+  padding: 8px 12px;
+  border-bottom: 1px solid #7f1d1d;
+  background: rgba(248, 113, 113, 0.05);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.timeline-track {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Bottom padding reserves the 34px tab bar so the timeline's last row
+     isn't permanently clipped. When the tray expands past the tab bar,
+     .tl-tray-spacer below grows to produce scrollable overflow so users
+     can pull content out from under the float tray. Canvas size is
+     viewport-driven — it never reflows on tray resize. */
+  padding: var(--s3) var(--s6) calc(var(--s3) + 34px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.tl-tray-spacer {
+  flex: 0 0 auto;
+  height: max(0px, calc(var(--tray-reserve, 34px) - 34px));
+}
+/* Track = one stacked row inside the timeline region. Header is a thin
+   meta strip; body holds whatever the track renders. */
+.track { display: flex; flex-direction: column; min-height: 0; }
+.track-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s2) 0 var(--s2);
+  border-bottom: 1px solid var(--divider);
+  font-size: 11px;
+  color: var(--fg-faint);
+  flex: 0 0 auto;
+}
+.track-head-right { font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: var(--s3); }
+.tl-shortcuts {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--s2);
+}
+.tl-shortcuts-toggle {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  cursor: help;
+  user-select: none;
+}
+.tl-shortcuts:hover .tl-shortcuts-toggle {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.tl-shortcuts-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  z-index: 30;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.tl-shortcuts:hover .tl-shortcuts-popover { display: flex; }
+.tl-shortcuts-row {
+  display: grid;
+  grid-template-columns: 86px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+.tl-detail-empty {
+  padding: 32px 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* .tl-frame owns focus-ring styling (see PhaseTimeline). */
+.tl-frame {
+  padding-top: var(--s2);
+  display: flex;
+  flex-direction: column;
+}
+.tl-phase-slot {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+.tl-segment-slot {
+  border-top: 1px dashed var(--divider);
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 0 0 auto;
+}
+.tl-divider {
+  flex: 0 0 auto;
+  height: 8px;
+  margin: 2px 0;
+  cursor: ns-resize;
+  position: relative;
+  background: transparent;
+  transition: background 120ms var(--ease);
+  z-index: 2;
+}
+.tl-divider::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 48px;
+  height: 2px;
+  background: var(--border-strong);
+  transition: background 120ms var(--ease);
+}
+.tl-divider:hover { background: rgba(217,249,157,0.05); }
+.tl-divider:hover::after { background: var(--accent); }
+.tray-pad { padding: var(--s4) var(--s6); }
+.flame-tab {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+}
+
 .section { margin-bottom: var(--s7); }
 
 .section-head {
