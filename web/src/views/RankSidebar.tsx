@@ -121,24 +121,25 @@ const STYLES = `
     flex-direction: column;
     background: var(--bg);
     border-right: 1px solid var(--border);
-    width: 220px;
-    min-width: 220px;
+    width: 176px;
+    min-width: 176px;
     transition: width 140ms var(--ease), min-width 140ms var(--ease);
     overflow: hidden;
   }
   .rank-sidebar.is-collapsed {
-    width: 52px;
-    min-width: 52px;
+    width: 42px;
+    min-width: 42px;
   }
   .rank-sidebar-head {
     display: flex;
     align-items: center;
-    gap: var(--s3);
-    padding: var(--s3) var(--s4);
+    gap: 6px;
+    padding: 4px 8px;
     border-bottom: 1px solid var(--divider);
-    font-size: 11px;
+    font-size: 10px;
     color: var(--fg-faint);
     flex: 0 0 auto;
+    min-height: 26px;
   }
   .rank-sidebar-count {
     margin-left: auto;
@@ -151,9 +152,9 @@ const STYLES = `
     border: 1px solid var(--border);
     color: var(--fg-faint);
     cursor: pointer;
-    padding: 0 6px;
-    font-size: 12px;
-    line-height: 18px;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 14px;
     margin-left: auto;
   }
   .rank-sidebar.is-collapsed .rank-sidebar-toggle { margin: 0 auto; }
@@ -164,26 +165,27 @@ const STYLES = `
   .rank-sidebar-list {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 6px 0;
+    padding: 2px 0;
   }
   .rank-row {
     appearance: none;
     background: transparent;
     border: none;
     border-left: 2px solid transparent;
-    padding: 6px 12px;
+    padding: 2px 8px;
     cursor: pointer;
     display: grid;
-    grid-template-columns: 38px 1fr auto;
+    grid-template-columns: 30px 1fr auto;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     width: 100%;
     color: var(--fg-muted);
     text-align: left;
+    min-height: 20px;
   }
   .rank-sidebar.is-collapsed .rank-row {
     grid-template-columns: 1fr;
-    padding: 8px 0;
+    padding: 3px 0;
     justify-items: center;
   }
   .rank-row:hover { background: var(--bg-elev); color: var(--fg); }
@@ -195,14 +197,14 @@ const STYLES = `
   .rank-row.is-pending { cursor: default; }
   .rank-row.is-pending:hover { background: transparent; }
   .rank-row-tag {
-    font-size: 11px;
-    letter-spacing: 0.04em;
+    font-size: 10px;
+    letter-spacing: 0.02em;
     color: var(--fg);
   }
   .rank-row.is-selected .rank-row-tag { color: var(--accent); }
   .rank-row-bar {
     position: relative;
-    height: 12px;
+    height: 9px;
     background: var(--bg-elev-2);
     display: flex;
     overflow: hidden;
@@ -238,7 +240,7 @@ const STYLES = `
     50%      { opacity: 0.75; }
   }
   .rank-row-peak {
-    font-size: 10px;
+    font-size: 9px;
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }
