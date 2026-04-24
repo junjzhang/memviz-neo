@@ -5,8 +5,8 @@ import { formatBytes, formatTopFrame } from "../utils";
 import TablePager from "../components/TablePager";
 
 const TYPE_LABELS: Record<string, string> = {
-  pending_free: "Pending Free",
-  leak: "Leak Suspect",
+  pending_free: "Pending",
+  leak: "Leak",
 };
 
 const TYPE_CHIP: Record<string, string> = {
@@ -75,7 +75,7 @@ export default function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
         <table className="dtable">
           <thead>
             <tr>
-              <th style={{ width: 120 }}>Type</th>
+              <th style={{ width: 78 }}>Type</th>
               <th style={{ width: 90 }}>Size</th>
               <th style={{ width: 260 }}>Source</th>
               <th>Detail</th>
