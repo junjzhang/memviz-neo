@@ -14,6 +14,8 @@ import { useDataStore } from "./stores/dataStore";
 import { useFileStore } from "./stores/fileStore";
 import { useRankSummaries } from "./stores/rankStore";
 import { useContainerSize } from "./hooks/useContainerWidth";
+import { usePersistedNumber } from "./hooks/usePersistedNumber";
+import { useDragResize } from "./hooks/useDragResize";
 
 export default function App() {
   const fileStatus = useFileStore((s) => s.status);
@@ -56,21 +58,7 @@ export default function App() {
 }
 
 function Empty({ label = "No data" }: { label?: string }) {
-  return (
-    <div
-      style={{
-        padding: "40px 0",
-        textAlign: "center",
-        color: "var(--fg-faint)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        letterSpacing: "0.08em",
-        textTransform: "uppercase",
-      }}
-    >
-      — {label} —
-    </div>
-  );
+  return <div className="empty-pad eyebrow">— {label} —</div>;
 }
 
 function Dashboard() {
@@ -111,9 +99,9 @@ function Dashboard() {
   const availableH = Math.max(300, Math.round(trackH - CHROME));
   const MIN_PHASE = 200;
   const MIN_SEGMENT = 80;
-  const [phaseRatio, setPhaseRatio] = useState<number>(() => {
-    const n = parseFloat(localStorage.getItem("phase-ratio") || "");
-    return n > 0 && n < 1 ? n : 0.78;
+  const [phaseRatio, setPhaseRatio] = usePersistedNumber("phase-ratio", 0.78, {
+    validate: (n) => n > 0 && n < 1,
+    serialize: (n) => n.toFixed(3),
   });
   const tlHeight = Math.max(
     MIN_PHASE,
@@ -121,35 +109,21 @@ function Dashboard() {
   );
   const segSlotHeight = availableH - tlHeight;
 
-  useEffect(() => {
-    localStorage.setItem("phase-ratio", phaseRatio.toFixed(3));
-  }, [phaseRatio]);
-
+  const startDrag = useDragResize();
   const handleDividerMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      e.preventDefault();
       const startY = e.clientY;
       const startH = tlHeight;
       const available = availableH;
-      const onMove = (ev: MouseEvent) => {
+      startDrag(e, (ev) => {
         const next = Math.max(
           MIN_PHASE,
           Math.min(available - MIN_SEGMENT, startH + (ev.clientY - startY)),
         );
         setPhaseRatio(next / available);
-      };
-      const onUp = () => {
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
-      document.body.style.cursor = "ns-resize";
-      document.body.style.userSelect = "none";
+      });
     },
-    [tlHeight, availableH],
+    [tlHeight, availableH, startDrag, setPhaseRatio],
   );
 
   const [mainView, setMainView] = useState<"timeline" | "flame">("timeline");

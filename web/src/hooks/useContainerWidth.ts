@@ -1,35 +1,10 @@
-import { useRef, useState, useEffect, useCallback } from "react";
-
-export function useContainerWidth<T extends HTMLElement = HTMLDivElement>(): [
-  React.RefObject<T | null>,
-  number,
-] {
-  const ref = useRef<T | null>(null);
-  const [width, setWidth] = useState(0);
-
-  const update = useCallback(() => {
-    if (ref.current) setWidth(ref.current.clientWidth);
-  }, []);
-
-  useEffect(() => {
-    update();
-    const ro = new ResizeObserver(update);
-    if (ref.current) ro.observe(ref.current);
-    return () => ro.disconnect();
-  }, [update]);
-
-  return [ref, width];
-}
+import { useCallback, useRef, useState } from "react";
 
 /**
- * Like useContainerWidth but also tracks height. Use when a child canvas
- * needs to be sized to a flex-sized parent (e.g. PhaseTimeline inside a
- * flex:1 pane that shrinks as the bottom tray grows).
- *
- * Reads sizes from ResizeObserver entries (contentRect) rather than
- * clientWidth/clientHeight — clientWidth can be stale or zero for
- * freshly-mounted flex items in some Chrome builds; the observer entry
- * is authoritative.
+ * Track a mounted element's content-box size via ResizeObserver. Returns
+ * a callback ref + current width/height. ResizeObserver entries are the
+ * authoritative source — clientWidth/Height can be stale or zero on
+ * freshly-mounted flex items in some Chrome builds.
  */
 export function useContainerSize<T extends HTMLElement = HTMLDivElement>(): [
   (el: T | null) => void,
@@ -60,23 +35,4 @@ export function useContainerSize<T extends HTMLElement = HTMLDivElement>(): [
   }, []);
 
   return [setRef, size.w, size.h];
-}
-
-/**
- * Viewport height minus the room the header + section chrome reserves,
- * clamped to a minimum so the plot stays usable on short windows.
- *
- *   min       — floor to return on tiny viewports.
- *   reserved  — px to subtract (header + section head + bottom padding).
- */
-export function useViewportHeight(min: number, reserved: number): number {
-  const compute = () =>
-    Math.max(min, Math.floor((typeof window !== "undefined" ? window.innerHeight : min + reserved) - reserved));
-  const [h, setH] = useState(compute);
-  useEffect(() => {
-    const on = () => setH(compute());
-    window.addEventListener("resize", on);
-    return () => window.removeEventListener("resize", on);
-  }, [min, reserved]); // eslint-disable-line react-hooks/exhaustive-deps
-  return h;
 }

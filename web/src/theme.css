@@ -80,6 +80,12 @@ button { font-family: inherit; }
   color: var(--fg-faint);
 }
 
+/* "— No data —" centered placeholder for empty plot slots. */
+.empty-pad {
+  padding: 40px 0;
+  text-align: center;
+}
+
 /* ---------- scrollbar ---------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -434,32 +440,6 @@ button { font-family: inherit; }
 .chip-red    { color: var(--red);    border-color: #7f1d1d; background: rgba(248,113,113,0.06); }
 .chip-orange { color: var(--orange); border-color: #78350f; background: rgba(251,191,36,0.06); }
 
-/* Rank card (MultiRank) ------------------------------------- */
-.rank-card {
-  width: 172px;
-  padding: var(--s4);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: all 160ms var(--ease);
-  position: relative;
-}
-.rank-card:hover {
-  border-color: var(--fg-faint);
-  transform: translateY(-2px);
-}
-.rank-card.is-selected {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-}
-.rank-card.is-selected::before {
-  content: "";
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-  background: var(--accent);
-}
-
 /* Stat display — large numbers ------------------------------- */
 .stat {
   display: flex;
@@ -481,69 +461,13 @@ button { font-family: inherit; }
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
 }
-.stat-sub {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--fg-faint);
-}
-
-/* Segmented control (for rank picker) ----------------------- */
-.seg {
-  display: inline-flex;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  padding: 2px;
-}
-.seg select {
-  background: transparent;
-  border: none;
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  padding: 6px 10px;
-  outline: none;
-  cursor: pointer;
-}
-.seg select option { background: var(--bg-elev); color: var(--fg); }
-
-/* ============================================================
-   Ant Design overrides (for components we keep: Select, Tooltip)
-   ============================================================ */
-.ant-tooltip-inner {
-  background: #0a0a0b !important;
-  border: 1px solid var(--border-strong) !important;
-  border-radius: 0 !important;
-  color: var(--fg) !important;
-  font-family: var(--font-mono) !important;
-  font-size: 11px !important;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
-}
-.ant-tooltip-arrow::before { background: #0a0a0b !important; }
-
-.ant-select .ant-select-selector {
-  background: var(--bg-elev) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 0 !important;
-  font-family: var(--font-mono) !important;
-}
-.ant-select-dropdown {
-  background: var(--bg-elev) !important;
-  border: 1px solid var(--border-strong) !important;
-  border-radius: 0 !important;
-  font-family: var(--font-mono) !important;
-}
 
 /* ============================================================
    Utility
    ============================================================ */
-.row { display: flex; align-items: center; gap: var(--s4); }
-.col { display: flex; flex-direction: column; }
-.grow { flex: 1; }
 .muted { color: var(--fg-muted); }
 .faint { color: var(--fg-faint); }
 .hl { color: var(--accent); }
-
-.divider-v { width: 1px; align-self: stretch; background: var(--divider); }
 
 /* Spin loader */
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -13,6 +13,31 @@ export function isInternalFrame(f: FrameRecord): boolean {
   );
 }
 
+/**
+ * Numeric preference backed by localStorage. Reads the key, rejects
+ * anything that fails `validate`, and falls back to `fallback`.
+ * `save` writes back; both handle missing localStorage (SSR / privacy
+ * mode) and quota errors gracefully. Use inside stores / modules where
+ * a hook isn't applicable; components should use usePersistedNumber.
+ */
+export function persistentNumber(
+  key: string,
+  fallback: number,
+  validate: (n: number) => boolean = () => true,
+) {
+  const load = (): number => {
+    if (typeof localStorage === "undefined") return fallback;
+    const raw = localStorage.getItem(key);
+    const n = raw != null ? Number(raw) : NaN;
+    return Number.isFinite(n) && validate(n) ? n : fallback;
+  };
+  const save = (n: number) => {
+    if (typeof localStorage === "undefined") return;
+    try { localStorage.setItem(key, String(n)); } catch { /* ignore quota */ }
+  };
+  return { load, save };
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];

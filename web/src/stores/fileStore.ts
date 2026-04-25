@@ -20,28 +20,10 @@ export function getActivePool(): WorkerPool | null {
   return activePool;
 }
 
+import { persistentNumber } from "../utils";
+
 const HW_CONC = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
 export const WORKER_COUNT_MAX = Math.max(4, Math.min(HW_CONC, 16));
-
-/**
- * Load a numeric preference from localStorage. Reads the key, rejects
- * anything that fails `validate`, and falls back to `fallback`.
- * `save` writes clamped values back; both handle missing localStorage
- * (SSR / privacy mode) and quota errors gracefully.
- */
-function persistentNumber(key: string, fallback: number, validate: (n: number) => boolean) {
-  const load = (): number => {
-    if (typeof localStorage === "undefined") return fallback;
-    const raw = localStorage.getItem(key);
-    const n = raw != null ? Number(raw) : NaN;
-    return Number.isFinite(n) && validate(n) ? n : fallback;
-  };
-  const save = (n: number) => {
-    if (typeof localStorage === "undefined") return;
-    try { localStorage.setItem(key, String(n)); } catch { /* ignore quota */ }
-  };
-  return { load, save };
-}
 
 const workerCountPref = persistentNumber(
   "memviz.workerCount",

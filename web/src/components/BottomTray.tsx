@@ -5,6 +5,8 @@
 // reloads.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { usePersistedNumber } from "../hooks/usePersistedNumber";
+import { useDragResize } from "../hooks/useDragResize";
 
 export type TrayScope = "selection" | "global";
 
@@ -51,13 +53,10 @@ export default function BottomTray({
   );
   // First-time visit starts collapsed so the timeline gets the full
   // viewport height. Resize + localStorage then takes over and is
-  // respected on subsequent loads.
-  const [height, setHeight] = useState(() => {
-    if (typeof window === "undefined") return TAB_BAR_H;
-    const raw = localStorage.getItem(storageKey);
-    if (raw == null) return TAB_BAR_H;
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) ? clamp(n, minHeight, maxHeight) : TAB_BAR_H;
+  // respected on subsequent loads. parse clamps to [min,max] so a stale
+  // value from a different viewport still lands in-range.
+  const [height, setHeight] = usePersistedNumber(storageKey, TAB_BAR_H, {
+    parse: (s) => clamp(parseInt(s, 10), minHeight, maxHeight),
   });
   const collapsed = height <= TAB_BAR_H + 2;
 
@@ -89,16 +88,12 @@ export default function BottomTray({
     setActiveId(tabs[0]?.id);
   }, [tabs, activeId]);
 
+  // Publish height as a CSS variable so the timeline-track can reserve
+  // matching bottom padding — lets the user scroll content out from
+  // under the float tray. (Persistence is handled by usePersistedNumber.)
   useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, String(height));
-    } catch {
-      /* quota / private mode — ignore */
-    }
-    // Publish so the timeline-track can reserve matching bottom padding
-    // — lets the user scroll content out from under the float tray.
     document.documentElement.style.setProperty("--tray-reserve", `${height}px`);
-  }, [height, storageKey]);
+  }, [height]);
 
   useEffect(() => {
     return () => {
@@ -106,29 +101,16 @@ export default function BottomTray({
     };
   }, []);
 
-  const dragRef = useRef<{ y: number; h: number } | null>(null);
+  const startDrag = useDragResize();
   const onHandleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      e.preventDefault();
-      dragRef.current = { y: e.clientY, h: height };
-      const onMove = (ev: MouseEvent) => {
-        const s = dragRef.current;
-        if (!s) return;
-        setHeight(clamp(s.h + (s.y - ev.clientY), minHeight, maxHeight));
-      };
-      const onUp = () => {
-        dragRef.current = null;
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
-      document.body.style.cursor = "ns-resize";
-      document.body.style.userSelect = "none";
+      const startY = e.clientY;
+      const startH = height;
+      startDrag(e, (ev) => {
+        setHeight(clamp(startH + (startY - ev.clientY), minHeight, maxHeight));
+      });
     },
-    [height, minHeight, maxHeight],
+    [height, minHeight, maxHeight, startDrag, setHeight],
   );
 
   const toggleCollapsed = useCallback(() => {
