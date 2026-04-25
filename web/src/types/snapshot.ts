@@ -45,9 +45,15 @@ export interface SegmentInfo {
 export interface TopAllocation {
   address: number;
   size: number;
-  /** Index into RankData.framePool; -1 if unknown. */
-  source_idx: number;
-  segment_type: string;
+  alloc_us: number;
+  /** -1 if alive at snapshot end. */
+  free_us: number;
+  /** Pre-computed (free_us - alloc_us), or (timeMax - alloc_us) if alive. */
+  lifetime_us: number;
+  /** Index into RankData.framePool. */
+  top_frame_idx: number;
+  /** Index into RankData.stackPool. */
+  stack_idx: number;
 }
 
 /** One frame record. framePool is a shared array; everything else refers by index. */

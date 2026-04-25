@@ -29,6 +29,8 @@ interface DataState {
   timelineAllocs: TimelineAlloc[];
   anomalies: Anomaly[];
   framePool: FrameRecord[];
+  /** Per-alloc stack pools — TopAllocations filters by frame using these. */
+  stackPool: Uint32Array[];
   timelineStripBuffer: Float32Array | null;
   /** Same strips, but t-columns replaced by event indices (for "event"
    *  X-axis mode). parseRank produces both up front. */
@@ -81,6 +83,7 @@ function applyRankData(data: RankData | null, rank: number): Partial<DataState> 
     timelineAllocs: data?.timelineAllocs ?? [],
     anomalies: data?.anomalies ?? [],
     framePool: data?.framePool ?? [],
+    stackPool: data?.stackPool ?? [],
     timelineStripBuffer: data?.stripBuffer ?? null,
     timelineStripBufferEvent: data?.stripBufferEvent ?? null,
     eventTimes: data?.eventTimes ?? null,
@@ -108,6 +111,7 @@ export const useDataStore = create<DataState>((set, get) => ({
   timelineAllocs: [],
   anomalies: [],
   framePool: [],
+  stackPool: [],
   timelineStripBuffer: null,
   timelineStripBufferEvent: null,
   eventTimes: null,

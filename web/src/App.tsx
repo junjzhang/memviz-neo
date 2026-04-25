@@ -153,6 +153,15 @@ function Dashboard() {
   );
 
   const [mainView, setMainView] = useState<"timeline" | "flame">("timeline");
+  // Flamegraph drill-in root, lifted up so the bottom Top Allocs can
+  // filter to "stack contains this frame". -1 = "All" (no filter).
+  const [flameRoot, setFlameRoot] = useState<{ idx: number; label: string }>({
+    idx: -1,
+    label: "",
+  });
+  const handleFlameRootChange = useCallback((idx: number, label: string) => {
+    setFlameRoot({ idx, label });
+  }, []);
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
 
   // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
@@ -175,6 +184,26 @@ function Dashboard() {
   }, [timeline?.time_min, timeline?.time_max, xAxisMode, eventTimes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const tabs = useMemo<TrayTab[]>(() => {
+    // Flamegraph mode: tray is the table extension of the flame view —
+    // only Top Allocs, filtered by whatever frame the user drilled into.
+    if (mainView === "flame") {
+      return [
+        {
+          id: "top",
+          label: "Top Allocs",
+          badge: topAllocations.length || undefined,
+          render: () => (
+            <div className="tray-pad">
+              <TopAllocations
+                data={topAllocations}
+                frameFilter={flameRoot.idx}
+                frameFilterLabel={flameRoot.label}
+              />
+            </div>
+          ),
+        },
+      ];
+    }
     const list: TrayTab[] = [
       {
         id: "details",
@@ -209,7 +238,7 @@ function Dashboard() {
       });
     }
     return list;
-  }, [topAllocations, anomalies]);
+  }, [mainView, topAllocations, anomalies, flameRoot]);
 
   return (
     <Layout>
@@ -303,6 +332,7 @@ function Dashboard() {
                     framePool={framePool}
                     width={tlWidth}
                     height={availableH}
+                    onRootChange={handleFlameRootChange}
                   />
                 ) : (
                   <Empty />

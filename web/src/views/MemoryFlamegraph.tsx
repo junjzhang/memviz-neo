@@ -7,6 +7,9 @@ interface Props {
   framePool: FrameRecord[];
   width: number;
   height: number;
+  /** Fires when the user drills in/out. -1 = "All" (no drill). The
+   *  parent uses this to filter Top Allocs by stack-contains-frame. */
+  onRootChange?: (frameIdx: number, label: string) => void;
 }
 
 const ROW_H = 20;
@@ -50,7 +53,7 @@ interface Crumb {
  * top. Hover to see the frame; click to drill in; use the breadcrumb to
  * pop back up.
  */
-export default function MemoryFlamegraph({ flame, framePool, width, height }: Props) {
+export default function MemoryFlamegraph({ flame, framePool, width, height, onRootChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dirtyRef = useRef(true);
   const hoverRef = useRef<FlameNode | null>(null);
@@ -77,6 +80,14 @@ export default function MemoryFlamegraph({ flame, framePool, width, height }: Pr
     setTrail([]);
     dirtyRef.current = true;
   }, [flame]);
+
+  // Publish current root upward so the parent can filter Top Allocs.
+  useEffect(() => {
+    if (!onRootChange) return;
+    const idx = trail.length > 0 ? trail[trail.length - 1].frameIdx : -1;
+    const label = trail.length > 0 ? trail[trail.length - 1].label : "";
+    onRootChange(idx, label);
+  }, [trail, onRootChange]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

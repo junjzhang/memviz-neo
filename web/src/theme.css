@@ -192,6 +192,24 @@ button { font-family: inherit; }
   min-height: 240px;
   padding-top: 8px;
 }
+.topallocs-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  background: var(--accent-bg);
+  border-left: 2px solid var(--accent);
+  font-size: 11px;
+}
+.topallocs-filter-frame {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tl-shortcuts {
   position: relative;
   display: inline-flex;

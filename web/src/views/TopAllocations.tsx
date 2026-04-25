@@ -6,33 +6,56 @@ import TablePager from "../components/TablePager";
 
 interface Props {
   data: TopAllocation[];
+  /** When set, only rows whose stack passes through this frame are shown.
+   *  Driven by the Flamegraph's drill-in root. */
+  frameFilter?: number | null;
+  /** Frame label for the filter chip (drilled-into frame name). */
+  frameFilterLabel?: string;
 }
 
-type SortKey = "size" | "segment_type";
+type SortKey = "size" | "lifetime_us";
 type SortDir = "asc" | "desc";
 
 const PAGE_SIZE = 20;
 
-export default function TopAllocations({ data }: Props) {
+export default function TopAllocations({
+  data,
+  frameFilter,
+  frameFilterLabel,
+}: Props) {
   const framePool = useDataStore((s) => s.framePool);
+  const stackPool = useDataStore((s) => s.stackPool);
   const [sortKey, setSortKey] = useState<SortKey>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [page, setPage] = useState(0);
 
+  const filtered = useMemo(() => {
+    if (frameFilter == null || frameFilter < 0) return data;
+    return data.filter((row) => {
+      const stack = stackPool[row.stack_idx];
+      if (!stack) return false;
+      for (let i = 0; i < stack.length; i++) {
+        if (stack[i] === frameFilter) return true;
+      }
+      return false;
+    });
+  }, [data, frameFilter, stackPool]);
+
   const sorted = useMemo(() => {
-    const copy = [...data];
+    const copy = [...filtered];
     copy.sort((a, b) => {
-      const av = a[sortKey] as number | string;
-      const bv = b[sortKey] as number | string;
+      const av = a[sortKey];
+      const bv = b[sortKey];
       if (av < bv) return sortDir === "asc" ? -1 : 1;
       if (av > bv) return sortDir === "asc" ? 1 : -1;
       return 0;
     });
     return copy;
-  }, [data, sortKey, sortDir]);
+  }, [filtered, sortKey, sortDir]);
 
   const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  const pageData = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const safePage = Math.min(page, Math.max(0, totalPages - 1));
+  const pageData = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   const toggleSort = (k: SortKey) => {
     if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -49,8 +72,20 @@ export default function TopAllocations({ data }: Props) {
       </span>
     ) : null;
 
+  const fmtLifetime = (row: TopAllocation) =>
+    row.free_us === -1 ? "alive" : `${(row.lifetime_us / 1e6).toFixed(3)}s`;
+
   return (
     <div>
+      {frameFilter != null && frameFilter >= 0 && (
+        <div className="topallocs-filter mono">
+          <span className="eyebrow">filtered by stack</span>
+          <span className="topallocs-filter-frame">{frameFilterLabel || "?"}</span>
+          <span className="faint">
+            · {filtered.length} of {data.length} · clear via "All" in flamegraph
+          </span>
+        </div>
+      )}
       <div className="dtable-scroll">
         <table className="dtable">
           <thead>
@@ -64,9 +99,9 @@ export default function TopAllocations({ data }: Props) {
               </th>
               <th
                 style={{ width: 110, cursor: "pointer", userSelect: "none" }}
-                onClick={() => toggleSort("segment_type")}
+                onClick={() => toggleSort("lifetime_us")}
               >
-                Type {sortArrow("segment_type")}
+                Lifetime {sortArrow("lifetime_us")}
               </th>
               <th>Source</th>
               <th style={{ width: 160 }}>Address</th>
@@ -74,13 +109,19 @@ export default function TopAllocations({ data }: Props) {
           </thead>
           <tbody>
             {pageData.map((row, i) => (
-              <tr key={row.address}>
-                <td className="mono faint">{page * PAGE_SIZE + i + 1}</td>
+              <tr key={`${row.address}-${row.alloc_us}`}>
+                <td className="mono faint">{safePage * PAGE_SIZE + i + 1}</td>
                 <td className="mono" style={{ color: "var(--fg)" }}>
                   {formatBytes(row.size)}
                 </td>
-                <td className="mono" style={{ fontSize: 11 }}>
-                  <span className="chip">{row.segment_type}</span>
+                <td
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    color: row.free_us === -1 ? "var(--red)" : "var(--fg-muted)",
+                  }}
+                >
+                  {fmtLifetime(row)}
                 </td>
                 <td
                   className="mono"
@@ -92,7 +133,7 @@ export default function TopAllocations({ data }: Props) {
                     maxWidth: 0,
                   }}
                 >
-                  {formatTopFrame(row.source_idx, framePool) || "—"}
+                  {formatTopFrame(row.top_frame_idx, framePool) || "—"}
                 </td>
                 <td className="mono" style={{ fontSize: 11 }}>
                   0x{row.address.toString(16)}
@@ -113,7 +154,7 @@ export default function TopAllocations({ data }: Props) {
           }}
         >
           <TablePager
-            page={page}
+            page={safePage}
             total={sorted.length}
             pageSize={PAGE_SIZE}
             onChange={setPage}

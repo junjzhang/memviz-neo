@@ -385,24 +385,28 @@ function buildFlameGraph(
 }
 
 /**
- * Flatten every allocated-block-that's-≥1MiB from the segments into a
- * plain list for the Address Map + TopAllocations views. Sorted size desc.
+ * Build the Top Allocs list from the same time-series IR the Flamegraph
+ * aggregates over. Rows carry stack_idx so the UI can filter by
+ * "stack contains frame X" when drilled into a flame node.
+ * Sorted by memory pressure (size × lifetime) desc.
  */
-function extractTopAllocations(rawSegments: any[]): TopAllocation[] {
-  const out: TopAllocation[] = [];
-  for (const seg of rawSegments) {
-    for (const b of seg.blocks || []) {
-      if (b.state !== "active_allocated") continue;
-      if (b.size < 1048576) continue;
-      out.push({
-        address: b.address,
-        size: b.size,
-        source_idx: b.top_frame_idx,
-        segment_type: seg.segment_type,
-      });
-    }
-  }
-  out.sort((a, b) => b.size - a.size);
+function extractTopAllocations(
+  topAllocsIR: TopAllocIR[],
+  timeMax: number,
+): TopAllocation[] {
+  const out: TopAllocation[] = topAllocsIR.map((a) => {
+    const lifetime = a.free_us === -1 ? timeMax - a.alloc_us : a.free_us - a.alloc_us;
+    return {
+      address: a.addr,
+      size: a.size,
+      alloc_us: a.alloc_us,
+      free_us: a.free_us,
+      lifetime_us: lifetime,
+      top_frame_idx: a.top_frame_idx,
+      stack_idx: a.stack_idx,
+    };
+  });
+  out.sort((a, b) => b.size * b.lifetime_us - a.size * a.lifetime_us);
   return out;
 }
 
@@ -439,7 +443,6 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
     })),
   }));
   segments.sort((a, b) => b.total_size - a.total_size);
-  const topAllocations = extractTopAllocations(raw.segments || []);
 
   // ---- Anomaly detection over the top-N (same cohort the UI surfaces) ----
   const allocations: Allocation[] = topAllocsIR.map((a) => ({
@@ -474,6 +477,7 @@ export function parseRank(irJson: string, _rank: number): ParseResult {
   const packed = packStrips(topAllocsIR, stripsFlat, baseline, timeMin, timeMax);
   const segmentRows = buildSegmentRows(segments, topAllocsIR, packed.timelineAllocs, packed.allocColors);
   const flame = buildFlameGraph(topAllocsIR, stackPool, framePool, timeMax);
+  const topAllocations = extractTopAllocations(topAllocsIR, timeMax);
 
   const data: RankData = {
     summary,
