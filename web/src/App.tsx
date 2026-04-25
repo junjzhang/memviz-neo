@@ -152,6 +152,7 @@ function Dashboard() {
     [tlHeight, availableH],
   );
 
+  const [mainView, setMainView] = useState<"timeline" | "flame">("timeline");
   const rankTag = `R${String(currentRank).padStart(2, "0")}`;
 
   // Shared pan/zoom ref — PhaseTimeline + SegmentTimeline both
@@ -185,11 +186,6 @@ function Dashboard() {
         ),
       },
       {
-        id: "flame",
-        label: "Flamegraph",
-        render: () => <FlameTab flame={flame} framePool={framePool} />,
-      },
-      {
         id: "top",
         label: "Top Allocs",
         badge: topAllocations.length || undefined,
@@ -213,7 +209,7 @@ function Dashboard() {
       });
     }
     return list;
-  }, [flame, framePool, topAllocations, anomalies]);
+  }, [topAllocations, anomalies]);
 
   return (
     <Layout>
@@ -223,59 +219,96 @@ function Dashboard() {
           {error && <div className="dashboard-error mono">! {error}</div>}
           <div ref={tlRef} className="track timeline-track">
             <div className="track-head mono">
-              <span className="eyebrow">Memory Timeline</span>
+              <div className="main-view-tabs">
+                <button
+                  className={mainView === "timeline" ? "is-active" : ""}
+                  onClick={() => setMainView("timeline")}
+                >
+                  Memory Timeline
+                </button>
+                <button
+                  className={mainView === "flame" ? "is-active" : ""}
+                  onClick={() => setMainView("flame")}
+                >
+                  Flamegraph
+                </button>
+              </div>
               <span className="track-head-right">
                 <span className="hl">{rankTag}</span>
-                <span className="faint"> · {timelineAllocs.length} allocs</span>
-                {segmentRows.length > 0 && (
-                  <span className="faint"> · {segmentRows.length} segments</span>
+                {mainView === "timeline" ? (
+                  <>
+                    <span className="faint"> · {timelineAllocs.length} allocs</span>
+                    {segmentRows.length > 0 && (
+                      <span className="faint"> · {segmentRows.length} segments</span>
+                    )}
+                    <ShortcutsHint />
+                  </>
+                ) : (
+                  flame && <span className="faint"> · {flame.totalWeight.toLocaleString()} bytes</span>
                 )}
-                <ShortcutsHint />
               </span>
             </div>
-            <div className="tl-frame">
+            {mainView === "timeline" ? (
+              <div className="tl-frame">
+                <div
+                  className="tl-phase-slot"
+                  style={{ height: tlHeight }}
+                >
+                  {timeline && tlWidth > 0 ? (
+                    <PhaseTimeline
+                      data={timeline}
+                      allocs={timelineAllocs}
+                      anomalies={anomalies}
+                      width={tlWidth}
+                      height={tlHeight}
+                      currentRank={currentRank}
+                      viewRangeRef={viewRangeRef}
+                    />
+                  ) : (
+                    <Empty />
+                  )}
+                </div>
+                {segmentRows.length > 0 && timeline && tlWidth > 0 && (
+                  <>
+                    <div
+                      className="tl-divider"
+                      onMouseDown={handleDividerMouseDown}
+                      title="Drag to resize memory / segment split"
+                    />
+                    <div
+                      className="tl-segment-slot"
+                      style={{ height: segSlotHeight }}
+                    >
+                      <SegmentTimeline
+                        data={timeline}
+                        rows={segmentRows}
+                        width={tlWidth}
+                        height={segSlotHeight}
+                        viewRangeRef={viewRangeRef}
+                        mode={xAxisMode}
+                        eventTimes={eventTimes}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
               <div
-                className="tl-phase-slot"
-                style={{ height: tlHeight }}
+                className="flame-main"
+                style={{ height: availableH }}
               >
-                {timeline && tlWidth > 0 ? (
-                  <PhaseTimeline
-                    data={timeline}
-                    allocs={timelineAllocs}
-                    anomalies={anomalies}
+                {flame && flame.totalWeight > 0 && tlWidth > 0 ? (
+                  <MemoryFlamegraph
+                    flame={flame}
+                    framePool={framePool}
                     width={tlWidth}
-                    height={tlHeight}
-                    currentRank={currentRank}
-                    viewRangeRef={viewRangeRef}
+                    height={availableH}
                   />
                 ) : (
                   <Empty />
                 )}
               </div>
-              {segmentRows.length > 0 && timeline && tlWidth > 0 && (
-                <>
-                  <div
-                    className="tl-divider"
-                    onMouseDown={handleDividerMouseDown}
-                    title="Drag to resize memory / segment split"
-                  />
-                  <div
-                    className="tl-segment-slot"
-                    style={{ height: segSlotHeight }}
-                  >
-                    <SegmentTimeline
-                      data={timeline}
-                      rows={segmentRows}
-                      width={tlWidth}
-                      height={segSlotHeight}
-                      viewRangeRef={viewRangeRef}
-                      mode={xAxisMode}
-                      eventTimes={eventTimes}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
+            )}
             {/* Spacer grows with tray height so timeline-track overflows
                 and becomes scrollable — lets users pull timeline content
                 out from under the floating tray. Shrinks to 0 when the
@@ -294,16 +327,3 @@ function Dashboard() {
   );
 }
 
-function FlameTab({ flame, framePool }: { flame: Parameters<typeof MemoryFlamegraph>[0]["flame"] | null; framePool: Parameters<typeof MemoryFlamegraph>[0]["framePool"] }) {
-  const [ref, w, h] = useContainerSize();
-  const ready = flame && flame.totalWeight > 0 && w > 0 && h > 0;
-  return (
-    <div ref={ref} className="flame-tab">
-      {ready ? (
-        <MemoryFlamegraph flame={flame} framePool={framePool} width={w} height={h} />
-      ) : (
-        <Empty />
-      )}
-    </div>
-  );
-}

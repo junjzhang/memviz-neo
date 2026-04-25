@@ -162,6 +162,36 @@ button { font-family: inherit; }
   flex: 0 0 auto;
 }
 .track-head-right { font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: var(--s3); }
+.main-view-tabs {
+  display: inline-flex;
+  gap: 2px;
+}
+.main-view-tabs button {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 2px 10px 4px;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  line-height: 1;
+}
+.main-view-tabs button:hover { color: var(--fg-muted); }
+.main-view-tabs button.is-active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.flame-main {
+  flex: 0 0 auto;
+  position: relative;
+  overflow: hidden;
+  min-height: 240px;
+  padding-top: 8px;
+}
 .tl-shortcuts {
   position: relative;
   display: inline-flex;
