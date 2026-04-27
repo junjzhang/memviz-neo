@@ -94,10 +94,16 @@ export const useFileStore = create<FileState>((set) => ({
     try {
       const dirHandle = await (window as any).showDirectoryPicker();
       const entries: { name: string; reader: FileReader }[] = [];
-      for await (const entry of dirHandle.values()) {
-        if (entry.kind === "file" && entry.name.endsWith(".pickle")) {
-          const handle = entry;
-          entries.push({ name: entry.name, reader: async () => (await handle.getFile()).arrayBuffer() });
+      const stack: any[] = [dirHandle];
+      while (stack.length > 0) {
+        const dir = stack.pop();
+        for await (const entry of dir.values()) {
+          if (entry.kind === "directory") {
+            stack.push(entry);
+          } else if (entry.kind === "file" && entry.name.endsWith(".pickle")) {
+            const handle = entry;
+            entries.push({ name: entry.name, reader: async () => (await handle.getFile()).arrayBuffer() });
+          }
         }
       }
       await loadAllParallel(entries, set);
@@ -166,28 +172,30 @@ async function loadAllParallel(
   entries: { name: string; reader: FileReader }[],
   set: (partial: Partial<FileState>) => void,
 ) {
-  entries.sort((a, b) => a.name.localeCompare(b.name));
   if (entries.length === 0) { set({ status: "error", error: "No .pickle files found" }); return; }
 
-  const ranks = entries.map((e) => extractRank(e.name)).sort((a, b) => a - b);
+  const items = entries
+    .map((e) => ({ rank: extractRank(e.name), name: e.name, reader: e.reader }))
+    .sort((a, b) => a.rank - b.rank);
+
   clearSummaries();
   set({
     status: "loading",
-    fileNames: entries.map((e) => e.name),
+    fileNames: items.map((i) => i.name),
     progress: 0,
     phase: "compile_wasm",
     completedCount: 0,
     inFlightCount: 0,
-    totalCount: entries.length,
+    totalCount: items.length,
     inFlightRanks: [],
     poolSize: 0,
     error: null,
-    ranks,
+    ranks: items.map((i) => i.rank),
   });
 
-  const tasks: WorkerTask[] = entries.map((e) => ({
-    rank: extractRank(e.name),
-    getBuffer: e.reader,
+  const tasks: WorkerTask[] = items.map((i) => ({
+    rank: i.rank,
+    getBuffer: i.reader,
   }));
 
   let firstDone = false;

@@ -65,7 +65,8 @@ export default function FileSelector() {
           </span>
         </h1>
         <p className="fs-lede">
-          Drop in a directory of <span className="mono hl">rank*.pickle</span> snapshots.
+          Drop in a directory — we recurse into it and pick up every
+          <span className="mono hl"> **/*rank&lt;N&gt;*.pickle</span> snapshot.
           Everything is parsed, computed and rendered locally in your browser —
           <span className="muted"> zero backend, zero upload.</span>
         </p>
